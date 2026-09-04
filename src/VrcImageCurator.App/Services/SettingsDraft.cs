@@ -1,4 +1,5 @@
 using System.IO;
+using VrcImageCurator.Core.FileSystem;
 using VrcImageCurator.Core.Models;
 
 namespace VrcImageCurator.App.Services;
@@ -15,6 +16,72 @@ public sealed record SettingsDraft(
     bool StartWithWindows,
     bool BringReviewForwardWhenHeld)
 {
+    /// <summary>
+    /// Returns the first invariant this draft would break, or <see langword="null"/> when it is
+    /// safe to persist. Only overlap problems block a save, because they are the ones that could
+    /// make the app treat its own archive as incoming. A folder that does not exist yet is
+    /// reported by <see cref="DescribeMissingFolders"/> instead: watched folders are allowed to
+    /// appear later.
+    /// </summary>
+    public string? DescribeBlockingProblem(AppSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+
+        try
+        {
+            foreach (var category in Categories.Where(item => item.IsEnabled))
+            {
+                if (string.IsNullOrWhiteSpace(category.SourcePath))
+                {
+                    return $"Choose a source folder for {category.Category} before enabling it.";
+                }
+
+                if (PathBoundary.Overlaps(category.SourcePath, OutputRootPath))
+                {
+                    return $"The {category.Category} source and the output folder cannot overlap.";
+                }
+
+                if (settings.LegacyArchiveMappings.Any(
+                        legacy => !string.IsNullOrWhiteSpace(legacy.ArchivePath)
+                            && PathBoundary.Overlaps(category.SourcePath, legacy.ArchivePath)))
+                {
+                    return $"The {category.Category} source cannot overlap a retained archive folder.";
+                }
+            }
+
+            return !string.IsNullOrWhiteSpace(settings.HoldingRootPath)
+                && PathBoundary.Overlaps(OutputRootPath, settings.HoldingRootPath)
+                ? "The output and application holding folders cannot overlap."
+                : null;
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return "That folder path is not valid, so the change was not saved.";
+        }
+    }
+
+    /// <summary>
+    /// Describes configured folders that do not exist yet, or <see langword="null"/> when they all do.
+    /// </summary>
+    public string? DescribeMissingFolders()
+    {
+        var missing = Categories
+            .Where(item => item.IsEnabled
+                && !string.IsNullOrWhiteSpace(item.SourcePath)
+                && !Directory.Exists(item.SourcePath))
+            .Select(item => $"{item.Category} source")
+            .ToList();
+        if (!string.IsNullOrWhiteSpace(OutputRootPath) && !Directory.Exists(OutputRootPath))
+        {
+            missing.Add("output");
+        }
+
+        return missing.Count == 0
+            ? null
+            : $"Saved. Folders that do not exist yet: {string.Join(", ", missing)}. Use Create missing folders.";
+    }
+
     public void ApplyTo(AppStateDocument state)
     {
         ArgumentNullException.ThrowIfNull(state);

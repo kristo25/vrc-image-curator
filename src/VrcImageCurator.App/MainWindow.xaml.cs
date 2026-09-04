@@ -3,7 +3,6 @@ using System.Windows;
 using System.Windows.Automation.Peers;
 using Microsoft.Win32;
 using VrcImageCurator.App.Services;
-using VrcImageCurator.Core.FileSystem;
 using VrcImageCurator.Core.Imaging;
 using VrcImageCurator.Core.Models;
 using VrcImageCurator.Core.Scanning;
@@ -18,6 +17,7 @@ public partial class MainWindow : Window
     private readonly PreviewService _previewService = new();
     private readonly LatestRequestGuard _reviewDisplayRequests = new();
     private bool _busy;
+    private bool _loadingSettings;
     private bool _scanProgressActive;
     private Guid? _validatedIncomingReviewId;
     private bool _validatedIncomingCurrent;
@@ -120,15 +120,33 @@ public partial class MainWindow : Window
 
     private void LoadSettings(AppSettings settings)
     {
-        LoadCategory(settings, VrcImageCategory.Emoji, EmojiSource, EmojiEnabled);
-        LoadCategory(settings, VrcImageCategory.Prints, PrintsSource, PrintsEnabled);
-        LoadCategory(settings, VrcImageCategory.Stickers, StickersSource, StickersEnabled);
-        OutputRoot.Text = settings.OutputRootPath;
-        UpdateResolvedDestinations(settings.OutputRootPath);
-        SimilarityCombo.SelectedItem = settings.SimilarityProfile;
-        StartWithWindowsCheck.IsChecked = settings.Automation.StartWithWindows;
-        StartWithWindowsCheck.IsEnabled = _runtime.AllowStartupRegistration;
-        BringReviewForwardCheck.IsChecked = settings.BringReviewForwardWhenHeld;
+        // Populating the controls raises the same change events that drive auto-save.
+        _loadingSettings = true;
+        try
+        {
+            LoadCategory(settings, VrcImageCategory.Emoji, EmojiSource, EmojiEnabled);
+            LoadCategory(settings, VrcImageCategory.Prints, PrintsSource, PrintsEnabled);
+            LoadCategory(settings, VrcImageCategory.Stickers, StickersSource, StickersEnabled);
+            OutputRoot.Text = settings.OutputRootPath;
+            UpdateResolvedDestinations(settings.OutputRootPath);
+            SimilarityCombo.SelectedItem = settings.SimilarityProfile;
+            StartWithWindowsCheck.IsChecked = settings.Automation.StartWithWindows;
+            StartWithWindowsCheck.IsEnabled = _runtime.AllowStartupRegistration;
+            BringReviewForwardCheck.IsChecked = settings.BringReviewForwardWhenHeld;
+            UpdateStartupStatusText();
+            var missingFolders = CaptureSettingsDraftOrNull()?.DescribeMissingFolders();
+            ShowSettingsNotice(
+                missingFolders ?? "Settings save automatically.",
+                isWarning: missingFolders is not null);
+        }
+        finally
+        {
+            _loadingSettings = false;
+        }
+    }
+
+    private void UpdateStartupStatusText()
+    {
         var executablePath = Environment.ProcessPath;
         StartupRegistrationStatus? startupStatus = !_runtime.AllowStartupRegistration
             ? null
@@ -140,7 +158,7 @@ public partial class MainWindow : Window
             null => "Windows startup changes are disabled for this isolated data profile.",
             StartupRegistrationStatus.Disabled => "Windows startup is not registered.",
             StartupRegistrationStatus.Current => "Windows startup points to this executable.",
-            StartupRegistrationStatus.Stale => "Windows startup points to an old location. Save settings to repair it.",
+            StartupRegistrationStatus.Stale => "Windows startup points to an old location. Toggle the checkbox to repair it.",
             _ => "Windows startup status is unknown.",
         };
     }
@@ -781,92 +799,133 @@ public partial class MainWindow : Window
             });
     }
 
-    private async void SaveSettings(object sender, RoutedEventArgs e)
+    private void SettingsToggled(object sender, RoutedEventArgs e) => BeginAutoSaveSettings();
+
+    private void SettingsSelectionChanged(
+        object sender,
+        System.Windows.Controls.SelectionChangedEventArgs e) => BeginAutoSaveSettings();
+
+    private void SettingsFieldCommitted(object sender, RoutedEventArgs e) => BeginAutoSaveSettings();
+
+    private void SettingsFieldKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
-        await RunBusyAsync("Saving settings...", SaveSettingsCoreAsync);
+        if (e.Key != System.Windows.Input.Key.Enter)
+        {
+            return;
+        }
+
+        e.Handled = true;
+        BeginAutoSaveSettings();
     }
 
-    private async Task SaveSettingsCoreAsync()
+    private void BeginAutoSaveSettings()
     {
-        var draft = CaptureSettingsDraft();
-        var currentState = await _runtime.StateStore.LoadAsync();
-
-        foreach (var category in draft.Categories.Where(item => item.IsEnabled))
+        if (_loadingSettings)
         {
-            if (!Directory.Exists(category.SourcePath))
-            {
-                throw new DirectoryNotFoundException($"{category.Category} source folder does not exist: {category.SourcePath}");
-            }
-
-            if (VrcImageCurator.Core.FileSystem.PathBoundary.Overlaps(category.SourcePath, draft.OutputRootPath))
-            {
-                throw new InvalidOperationException($"The {category.Category} source and output folders cannot overlap.");
-            }
-
-            if (currentState.Settings.LegacyArchiveMappings.Any(
-                    legacy => VrcImageCurator.Core.FileSystem.PathBoundary.Overlaps(category.SourcePath, legacy.ArchivePath)))
-            {
-                throw new InvalidOperationException($"The {category.Category} source cannot overlap a retained archive folder.");
-            }
+            return;
         }
 
-        if (VrcImageCurator.Core.FileSystem.PathBoundary.Overlaps(
-                draft.OutputRootPath,
-                currentState.Settings.HoldingRootPath))
+        _ = AsyncCommandRunner.RunAsync(AutoSaveSettingsAsync, ReportSettingsAutoSaveFailureAsync);
+    }
+
+    /// <summary>
+    /// Persists the settings controls as soon as a field is committed. Folder-existence problems
+    /// are reported inline rather than refused, because a watched folder is allowed to appear
+    /// later; only the overlap invariants that could make the app scan its own archive block a save.
+    /// </summary>
+    private async Task AutoSaveSettingsAsync()
+    {
+        var draft = CaptureSettingsDraftOrNull();
+        if (draft is null)
         {
-            throw new InvalidOperationException("The output and application holding folders cannot overlap.");
+            ShowSettingsNotice("Choose a main output folder.", isWarning: true);
+            return;
         }
 
-        if (!Directory.Exists(draft.OutputRootPath))
+        var settings = (await _runtime.StateStore.LoadAsync()).Settings;
+        if (draft.DescribeBlockingProblem(settings) is { } blocking)
         {
-            if (MessageBox.Show(
-                    this,
-                    $"Create the main output folder and category folders?\n{draft.OutputRootPath}",
-                    "Create output folder",
-                    MessageBoxButton.YesNo,
-                    MessageBoxImage.Question) != MessageBoxResult.Yes)
-            {
-                throw new DirectoryNotFoundException("The main output folder is required.");
-            }
+            ShowSettingsNotice(blocking, isWarning: true);
+            return;
         }
 
-        Directory.CreateDirectory(draft.OutputRootPath);
-        foreach (var category in AppStateDefaults.FixedCategories)
-        {
-            Directory.CreateDirectory(Path.Combine(draft.OutputRootPath, category.ToString()));
-        }
-
+        var startupChanged = settings.Automation.StartWithWindows != draft.StartWithWindows;
         await _runtime.StateStore.UpdateAsync(
             state =>
             {
                 draft.ApplyTo(state);
                 return true;
             });
-        try
+
+        if (startupChanged)
         {
             await _runtime.ApplyAutomationSettingsAsync(updateStartupRegistration: true);
         }
-        catch (Exception exception) when (
-            exception is IOException
-                or UnauthorizedAccessException
-                or InvalidOperationException
-                or NotSupportedException)
-        {
-            var logPath = await DiagnosticLog.TryWriteAsync(_runtime.StateDirectory, exception);
-            SetStatus("Settings were saved, but Windows startup or folder monitoring could not be updated.");
-            var details = logPath is null ? string.Empty : $"\n\nDetails were written to:\n{logPath}";
-            MessageBox.Show(
-                this,
-                $"Your folder settings were saved. {exception.Message}{details}",
-                "Settings saved with a warning",
-                MessageBoxButton.OK,
-                MessageBoxImage.Warning);
-            await RefreshAsync();
-            return;
-        }
 
-        SetStatus("Settings saved. Changed folders will be reindexed on the next scan.");
-        await RefreshAsync();
+        UpdateResolvedDestinations(draft.OutputRootPath);
+        UpdateStartupStatusText();
+        var missing = draft.DescribeMissingFolders();
+        ShowSettingsNotice(
+            missing ?? $"Settings saved at {DateTime.Now:t}.",
+            isWarning: missing is not null);
+    }
+
+    private async Task ReportSettingsAutoSaveFailureAsync(Exception exception)
+    {
+        var logPath = await DiagnosticLog.TryWriteAsync(_runtime.StateDirectory, exception);
+        var detail = logPath is null ? string.Empty : $" Details: {logPath}";
+        await Dispatcher.InvokeAsync(
+            () => ShowSettingsNotice($"Settings were not saved. {exception.Message}{detail}", isWarning: true));
+    }
+
+    private void ShowSettingsNotice(string? message, bool isWarning)
+    {
+        SettingsNoticeText.Text = message ?? string.Empty;
+        SettingsNoticeText.Foreground = isWarning && !string.IsNullOrWhiteSpace(message)
+            ? (System.Windows.Media.Brush)FindResource("DangerBrush")
+            : (System.Windows.Media.Brush)FindResource("MutedTextBrush");
+    }
+
+    private async void CreateMissingFolders(object sender, RoutedEventArgs e)
+    {
+        await RunBusyAsync(
+            "Creating folders...",
+            async () =>
+            {
+                var draft = CaptureSettingsDraftOrNull();
+                if (draft is null)
+                {
+                    ShowSettingsNotice("Choose a main output folder.", isWarning: true);
+                    return;
+                }
+
+                Directory.CreateDirectory(draft.OutputRootPath);
+                foreach (var category in AppStateDefaults.FixedCategories)
+                {
+                    Directory.CreateDirectory(Path.Combine(draft.OutputRootPath, category.ToString()));
+                }
+
+                foreach (var category in draft.Categories.Where(
+                    item => item.IsEnabled && !string.IsNullOrWhiteSpace(item.SourcePath)))
+                {
+                    Directory.CreateDirectory(category.SourcePath);
+                }
+
+                await AutoSaveSettingsAsync();
+                SetStatus("Folders created.");
+            });
+    }
+
+    private SettingsDraft? CaptureSettingsDraftOrNull()
+    {
+        try
+        {
+            return CaptureSettingsDraft();
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
     }
 
     private SettingsDraft CaptureSettingsDraft()

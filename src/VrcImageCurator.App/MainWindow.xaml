@@ -210,23 +210,23 @@
                     <Grid Margin="0,0,0,8">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="90" /><ColumnDefinition Width="*" /><ColumnDefinition Width="44" /><ColumnDefinition Width="80" /></Grid.ColumnDefinitions>
                         <TextBlock VerticalAlignment="Center" Text="Emoji" />
-                        <TextBox x:Name="EmojiSource" Grid.Column="1" automation:AutomationProperties.Name="Emoji source folder" />
+                        <TextBox x:Name="EmojiSource" Grid.Column="1" LostFocus="SettingsFieldCommitted" KeyDown="SettingsFieldKeyDown" automation:AutomationProperties.Name="Emoji source folder" />
                         <Button Grid.Column="2" Margin="6,0" Padding="8" Content="..." Tag="EmojiSource" Click="BrowseFolder" automation:AutomationProperties.Name="Browse Emoji source folder" />
-                        <CheckBox x:Name="EmojiEnabled" Grid.Column="3" Content="Enabled" automation:AutomationProperties.Name="Enable Emoji source" />
+                        <CheckBox x:Name="EmojiEnabled" Grid.Column="3" Content="Enabled" Checked="SettingsToggled" Unchecked="SettingsToggled" automation:AutomationProperties.Name="Enable Emoji source" />
                     </Grid>
                     <Grid Margin="0,0,0,8">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="90" /><ColumnDefinition Width="*" /><ColumnDefinition Width="44" /><ColumnDefinition Width="80" /></Grid.ColumnDefinitions>
                         <TextBlock VerticalAlignment="Center" Text="Prints" />
-                        <TextBox x:Name="PrintsSource" Grid.Column="1" automation:AutomationProperties.Name="Prints source folder" />
+                        <TextBox x:Name="PrintsSource" Grid.Column="1" LostFocus="SettingsFieldCommitted" KeyDown="SettingsFieldKeyDown" automation:AutomationProperties.Name="Prints source folder" />
                         <Button Grid.Column="2" Margin="6,0" Padding="8" Content="..." Tag="PrintsSource" Click="BrowseFolder" automation:AutomationProperties.Name="Browse Prints source folder" />
-                        <CheckBox x:Name="PrintsEnabled" Grid.Column="3" Content="Enabled" automation:AutomationProperties.Name="Enable Prints source" />
+                        <CheckBox x:Name="PrintsEnabled" Grid.Column="3" Content="Enabled" Checked="SettingsToggled" Unchecked="SettingsToggled" automation:AutomationProperties.Name="Enable Prints source" />
                     </Grid>
                     <Grid Margin="0,0,0,20">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="90" /><ColumnDefinition Width="*" /><ColumnDefinition Width="44" /><ColumnDefinition Width="80" /></Grid.ColumnDefinitions>
                         <TextBlock VerticalAlignment="Center" Text="Stickers" />
-                        <TextBox x:Name="StickersSource" Grid.Column="1" automation:AutomationProperties.Name="Stickers source folder" />
+                        <TextBox x:Name="StickersSource" Grid.Column="1" LostFocus="SettingsFieldCommitted" KeyDown="SettingsFieldKeyDown" automation:AutomationProperties.Name="Stickers source folder" />
                         <Button Grid.Column="2" Margin="6,0" Padding="8" Content="..." Tag="StickersSource" Click="BrowseFolder" automation:AutomationProperties.Name="Browse Stickers source folder" />
-                        <CheckBox x:Name="StickersEnabled" Grid.Column="3" Content="Enabled" automation:AutomationProperties.Name="Enable Stickers source" />
+                        <CheckBox x:Name="StickersEnabled" Grid.Column="3" Content="Enabled" Checked="SettingsToggled" Unchecked="SettingsToggled" automation:AutomationProperties.Name="Enable Stickers source" />
                     </Grid>
 
                     <Grid Margin="0,0,0,20">
@@ -235,7 +235,7 @@
                             <TextBlock FontWeight="SemiBold" Text="Main output folder" />
                             <TextBlock FontSize="12" Foreground="{StaticResource MutedTextBrush}" Text="Category and source subfolders are preserved." />
                         </StackPanel>
-                        <TextBox x:Name="OutputRoot" Grid.Column="1" TextChanged="OutputRootChanged" automation:AutomationProperties.Name="Main output folder" />
+                        <TextBox x:Name="OutputRoot" Grid.Column="1" TextChanged="OutputRootChanged" LostFocus="SettingsFieldCommitted" KeyDown="SettingsFieldKeyDown" automation:AutomationProperties.Name="Main output folder" />
                         <Button Grid.Column="2" Margin="6,0,0,0" Padding="8" Content="..." Tag="OutputRoot" Click="BrowseFolder" automation:AutomationProperties.Name="Browse main output folder" />
                     </Grid>
 
@@ -254,7 +254,7 @@
                             <TextBlock FontWeight="SemiBold" Text="Similarity" />
                             <TextBlock FontSize="12" Foreground="{StaticResource MutedTextBrush}" Text="Conservative is recommended." />
                         </StackPanel>
-                        <ComboBox x:Name="SimilarityCombo" Grid.Column="1">
+                        <ComboBox x:Name="SimilarityCombo" Grid.Column="1" SelectionChanged="SettingsSelectionChanged">
                             <ComboBox.Resources>
                                 <Style TargetType="TextBlock">
                                     <Setter Property="Foreground" Value="#111216" />
@@ -264,13 +264,15 @@
                     </Grid>
 
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,20">
-                        <CheckBox x:Name="StartWithWindowsCheck" Margin="0,0,28,0" Content="Start with Windows" />
-                        <CheckBox x:Name="BringReviewForwardCheck" Content="Bring Review forward when a match is queued" />
+                        <CheckBox x:Name="StartWithWindowsCheck" Margin="0,0,28,0" Content="Start with Windows" Checked="SettingsToggled" Unchecked="SettingsToggled" />
+                        <CheckBox x:Name="BringReviewForwardCheck" Content="Bring Review forward when a match is queued" Checked="SettingsToggled" Unchecked="SettingsToggled" />
                     </StackPanel>
                     <TextBlock x:Name="StartupStatusText" Margin="0,-12,0,20" Foreground="{StaticResource MutedTextBrush}" automation:AutomationProperties.Name="Windows startup registration status" />
 
+                    <TextBlock x:Name="SettingsNoticeText" Margin="0,0,0,10" TextWrapping="Wrap" Foreground="{StaticResource MutedTextBrush}" Text="Settings save automatically." automation:AutomationProperties.Name="Settings status" />
+
                     <WrapPanel Margin="0,0,0,28">
-                        <Button Style="{StaticResource PrimaryButton}" Content="Save settings" Margin="0,0,8,0" Click="SaveSettings" automation:AutomationProperties.Name="Save settings" />
+                        <Button Style="{StaticResource PrimaryButton}" Content="Create missing folders" Margin="0,0,8,0" Click="CreateMissingFolders" automation:AutomationProperties.Name="Create the configured source and output folders" />
                         <Button Content="Rebuild indexes" Click="RebuildIndexes" automation:AutomationProperties.Name="Rebuild enabled archive indexes" />
                     </WrapPanel>
 

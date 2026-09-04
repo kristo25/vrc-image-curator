@@ -75,4 +75,99 @@ public sealed class SettingsDraftTests
                 state.Settings.LegacyArchiveMappings,
                 legacy => legacy.Category == pair.Key && legacy.ArchivePath == pair.Value));
     }
+
+    private static SettingsDraft Draft(
+        string outputRoot,
+        VrcImageCategory enabledCategory,
+        string enabledSource) =>
+        new(
+            AppStateDefaults.FixedCategories
+                .Select(category => new CategorySettingsDraft(
+                    category,
+                    category == enabledCategory ? enabledSource : string.Empty,
+                    category == enabledCategory))
+                .ToArray(),
+            outputRoot,
+            SimilarityProfile.Conservative,
+            StartWithWindows: false,
+            BringReviewForwardWhenHeld: true);
+
+    [Fact]
+    public void DefaultLayoutPlacesTheArchiveBesideTheCategoryFoldersWithoutOverlapping()
+    {
+        using var directory = new TestDirectory();
+        var state = AppStateDefaults.Create(directory.GetPath("profile"), directory.GetPath("local"));
+        var draft = new SettingsDraft(
+            state.Settings.CategoryMappings
+                .Select(mapping => new CategorySettingsDraft(mapping.Category, mapping.SourcePath, true))
+                .ToArray(),
+            state.Settings.OutputRootPath,
+            SimilarityProfile.Conservative,
+            StartWithWindows: false,
+            BringReviewForwardWhenHeld: true);
+
+        Assert.Null(draft.DescribeBlockingProblem(state.Settings));
+    }
+
+    [Fact]
+    public void SourceThatContainsTheOutputRootIsRefused()
+    {
+        using var directory = new TestDirectory();
+        var state = AppStateDefaults.Create(directory.GetPath("profile"), directory.GetPath("local"));
+        var vrchatRoot = directory.GetPath("profile", "Images", "VRChat");
+        var draft = Draft(
+            Path.Combine(vrchatRoot, "Archived Images"),
+            VrcImageCategory.Emoji,
+            vrchatRoot);
+
+        var problem = draft.DescribeBlockingProblem(state.Settings);
+
+        Assert.NotNull(problem);
+        Assert.Contains("cannot overlap", problem, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EnabledCategoryWithoutASourceFolderIsRefused()
+    {
+        using var directory = new TestDirectory();
+        var state = AppStateDefaults.Create(directory.GetPath("profile"), directory.GetPath("local"));
+        var draft = Draft(directory.GetPath("output"), VrcImageCategory.Prints, string.Empty);
+
+        var problem = draft.DescribeBlockingProblem(state.Settings);
+
+        Assert.NotNull(problem);
+        Assert.Contains("Prints", problem, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MissingFoldersAreReportedWithoutBlockingTheSave()
+    {
+        using var directory = new TestDirectory();
+        var state = AppStateDefaults.Create(directory.GetPath("profile"), directory.GetPath("local"));
+        var draft = Draft(
+            directory.GetPath("output-that-does-not-exist"),
+            VrcImageCategory.Stickers,
+            directory.GetPath("source-that-does-not-exist"));
+
+        Assert.Null(draft.DescribeBlockingProblem(state.Settings));
+        var missing = draft.DescribeMissingFolders();
+        Assert.NotNull(missing);
+        Assert.Contains("Stickers source", missing, StringComparison.Ordinal);
+        Assert.Contains("output", missing, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ExistingFoldersReportNothingMissing()
+    {
+        using var directory = new TestDirectory();
+        var state = AppStateDefaults.Create(directory.GetPath("profile"), directory.GetPath("local"));
+        var source = directory.GetPath("source");
+        var output = directory.GetPath("output");
+        Directory.CreateDirectory(source);
+        Directory.CreateDirectory(output);
+        var draft = Draft(output, VrcImageCategory.Emoji, source);
+
+        Assert.Null(draft.DescribeBlockingProblem(state.Settings));
+        Assert.Null(draft.DescribeMissingFolders());
+    }
 }

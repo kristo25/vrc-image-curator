@@ -125,6 +125,7 @@ Path-boundary and reparse-point checks guard file operations. Moves and recycle 
 - Configurable source paths and one main archive root.
 - Recursive one-time scan of another folder with category selection.
 - Start/stop watching while the app is open.
+- Settings save automatically on field commit; only overlap violations block a save.
 - Optional per-user `Start with Windows` registration.
 - Multiple visual themes.
 - Incoming and candidate previews, including animated GIF handling.

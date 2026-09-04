@@ -15,6 +15,7 @@ VRC Image Curator is a local Windows tool for reviewing duplicate and similar im
 - Oversized or unusually frame-heavy images are rejected before full decoding to protect application memory.
 - Interrupted moves and recycle requests are recorded in a durable operation journal and reconciled on restart.
 - Archive fingerprints are stored locally and reused when a file's path, size, and modification time are unchanged. Every scan refreshes additions, removals, and changed files before matching.
+- Settings save automatically when a field is committed. A folder that does not exist yet is reported inline rather than refused, so a folder that appears later still works; only overlapping source and output folders block a save.
 - Tests use temporary folders and never access the configured VRCX or archive folders.
 
 ## Supported files
@@ -27,7 +28,7 @@ PNG, animated GIF, JPG/JPEG, WebP, and BMP are supported. MP4, `.temp`, and unsu
 2. Open **Settings**.
 3. Choose the source folders and enable the categories you want to use.
 4. Choose one main output folder. The default is `Images\VRChat\Archived Images` beneath your user folder.
-5. Save settings, then select **Scan now**.
+5. Settings save automatically as you change them. Use **Create missing folders** if a configured folder does not exist yet, then select **Scan now**.
 6. Use **Scan another folder** for a one-time recursive scan outside the configured VRCX folders.
 7. Use **Start watching** when you want the app to monitor configured folders during the current session. Temporarily unavailable folders are attached automatically when they return.
 8. Review matches with **Keep incoming**, **Keep match**, or **Move as Unique**.
