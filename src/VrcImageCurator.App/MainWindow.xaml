@@ -110,7 +110,7 @@
                         </StackPanel>
                     </Grid>
 
-                    <Border Grid.Row="1" Background="#0A0B0E" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="5">
+                    <Border Grid.Row="1" Background="{StaticResource PreviewBackdropBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="5">
                         <Grid>
                             <Image x:Name="IncomingPreview" Stretch="Uniform" RenderTransformOrigin="0.5,0.5" automation:AutomationProperties.Name="Incoming image preview">
                                 <Image.RenderTransform><ScaleTransform x:Name="IncomingScale" ScaleX="1" ScaleY="1" /></Image.RenderTransform>
@@ -147,7 +147,7 @@
                                             <RowDefinition Height="Auto" />
                                             <RowDefinition Height="Auto" />
                                         </Grid.RowDefinitions>
-                                        <Border Background="#0A0B0E" CornerRadius="4">
+                                        <Border Background="{StaticResource PreviewBackdropBrush}" CornerRadius="4">
                                             <Image Tag="{Binding ArchivePath}" Loaded="CandidatePreviewLoaded" Unloaded="CandidatePreviewUnloaded" Stretch="Uniform" automation:AutomationProperties.Name="Archive match preview" />
                                         </Border>
                                         <Grid Grid.Row="1" Margin="0,8,0,0">
