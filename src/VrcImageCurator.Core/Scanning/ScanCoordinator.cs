@@ -253,14 +253,22 @@ public sealed class ScanCoordinator
             return new CategoryScanResult(category, 0, 0, 0, 0, ["Source folder is unavailable or disabled."]);
         }
 
+        sourceSnapshot ??= CreateSourceSnapshotSafe(sourceRoot);
+        if (sourceSnapshot.Error is not null)
+        {
+            return new CategoryScanResult(category, 0, 0, 0, 0, [sourceSnapshot.Error]);
+        }
+
         // The output folder is where this scan puts files, so create it on demand instead of
         // failing. Source folders are never created: an empty one would have nothing to scan.
+        // This runs after the snapshot so a failure can still complete both progress streams.
         try
         {
             Directory.CreateDirectory(mapping.ArchivePath);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
+            ReportUnprocessed(sourceSnapshot.Paths.Count, onImageScanned, onImageProcessed);
             return new CategoryScanResult(
                 category,
                 0,
@@ -268,12 +276,6 @@ public sealed class ScanCoordinator
                 0,
                 0,
                 [$"The {category} output folder could not be created: {exception.Message}"]);
-        }
-
-        sourceSnapshot ??= CreateSourceSnapshotSafe(sourceRoot);
-        if (sourceSnapshot.Error is not null)
-        {
-            return new CategoryScanResult(category, 0, 0, 0, 0, [sourceSnapshot.Error]);
         }
 
         var indexResult = await _indexer.RefreshAsync(category, cancellationToken).ConfigureAwait(false);

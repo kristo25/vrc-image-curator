@@ -547,7 +547,11 @@ public sealed class ScanCoordinatorTests
         using var image = ImageFixtureFactory.CreatePattern(72);
         await image.SaveAsPngAsync(Path.Combine(manualSource, "blocked.png"));
         using var store = FileRouterTests.CreateStore(directory, configuredSource, archiveRoot);
+
+        // A scan creates a missing output folder, so block the path with a file instead:
+        // the index genuinely cannot be built, and progress must still complete.
         Directory.Delete(archiveRoot);
+        await File.WriteAllTextAsync(archiveRoot, "not a folder");
         var decoder = new ImageDecoder();
         var coordinator = new ScanCoordinator(
             store,

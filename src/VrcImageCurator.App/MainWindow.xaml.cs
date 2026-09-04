@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Automation.Peers;
 using Microsoft.Win32;
 using VrcImageCurator.App.Services;
+using VrcImageCurator.Core.FileSystem;
 using VrcImageCurator.Core.Imaging;
 using VrcImageCurator.Core.Models;
 using VrcImageCurator.Core.Scanning;
