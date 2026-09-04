@@ -886,36 +886,6 @@ public partial class MainWindow : Window
             : (System.Windows.Media.Brush)FindResource("MutedTextBrush");
     }
 
-    private async void CreateMissingFolders(object sender, RoutedEventArgs e)
-    {
-        await RunBusyAsync(
-            "Creating folders...",
-            async () =>
-            {
-                var draft = CaptureSettingsDraftOrNull();
-                if (draft is null)
-                {
-                    ShowSettingsNotice("Choose a main output folder.", isWarning: true);
-                    return;
-                }
-
-                Directory.CreateDirectory(draft.OutputRootPath);
-                foreach (var category in AppStateDefaults.FixedCategories)
-                {
-                    Directory.CreateDirectory(Path.Combine(draft.OutputRootPath, category.ToString()));
-                }
-
-                foreach (var category in draft.Categories.Where(
-                    item => item.IsEnabled && !string.IsNullOrWhiteSpace(item.SourcePath)))
-                {
-                    Directory.CreateDirectory(category.SourcePath);
-                }
-
-                await AutoSaveSettingsAsync();
-                SetStatus("Folders created.");
-            });
-    }
-
     private SettingsDraft? CaptureSettingsDraftOrNull()
     {
         try

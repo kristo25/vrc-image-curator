@@ -272,8 +272,7 @@
                     <TextBlock x:Name="SettingsNoticeText" Margin="0,0,0,10" TextWrapping="Wrap" Foreground="{StaticResource MutedTextBrush}" Text="Settings save automatically." automation:AutomationProperties.Name="Settings status" />
 
                     <WrapPanel Margin="0,0,0,28">
-                        <Button Style="{StaticResource PrimaryButton}" Content="Create missing folders" Margin="0,0,8,0" Click="CreateMissingFolders" automation:AutomationProperties.Name="Create the configured source and output folders" />
-                        <Button Content="Rebuild indexes" Click="RebuildIndexes" automation:AutomationProperties.Name="Rebuild enabled archive indexes" />
+                        <Button Style="{StaticResource PrimaryButton}" Content="Rebuild indexes" Click="RebuildIndexes" automation:AutomationProperties.Name="Rebuild enabled archive indexes" />
                     </WrapPanel>
 
                     <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="5" Padding="16" Margin="0,0,0,20">

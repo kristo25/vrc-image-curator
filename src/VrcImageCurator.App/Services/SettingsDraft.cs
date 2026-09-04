@@ -62,7 +62,8 @@ public sealed record SettingsDraft(
     }
 
     /// <summary>
-    /// Describes configured folders that do not exist yet, or <see langword="null"/> when they all do.
+    /// Describes enabled source folders that do not exist yet, or <see langword="null"/> when they
+    /// all do. The output folder is not reported: a scan creates it on demand.
     /// </summary>
     public string? DescribeMissingFolders()
     {
@@ -72,14 +73,11 @@ public sealed record SettingsDraft(
                 && !Directory.Exists(item.SourcePath))
             .Select(item => $"{item.Category} source")
             .ToList();
-        if (!string.IsNullOrWhiteSpace(OutputRootPath) && !Directory.Exists(OutputRootPath))
-        {
-            missing.Add("output");
-        }
 
         return missing.Count == 0
             ? null
-            : $"Saved. Folders that do not exist yet: {string.Join(", ", missing)}. Use Create missing folders.";
+            : $"Saved. These folders do not exist yet: {string.Join(", ", missing)}. "
+                + "Scanning skips them until they appear.";
     }
 
     public void ApplyTo(AppStateDocument state)

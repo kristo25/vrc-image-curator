@@ -153,7 +153,9 @@ public sealed class SettingsDraftTests
         var missing = draft.DescribeMissingFolders();
         Assert.NotNull(missing);
         Assert.Contains("Stickers source", missing, StringComparison.Ordinal);
-        Assert.Contains("output", missing, StringComparison.Ordinal);
+
+        // The output folder is not reported: a scan creates it on demand.
+        Assert.DoesNotContain("output", missing, StringComparison.Ordinal);
     }
 
     [Fact]

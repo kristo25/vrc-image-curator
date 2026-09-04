@@ -673,4 +673,31 @@ public sealed class ScanCoordinatorTests
         Assert.True(File.Exists(unreadable));
         Assert.Contains(result.Errors, error => error.Contains(unreadable, StringComparison.Ordinal));
     }
+
+    [Fact]
+    public async Task ScanCreatesAMissingOutputFolderInsteadOfFailing()
+    {
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        using var image = ImageFixtureFactory.CreatePattern(43);
+        await image.SaveAsPngAsync(Path.Combine(sourceRoot, "unique.png"));
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var decoder = new ImageDecoder();
+        var coordinator = new ScanCoordinator(
+            store,
+            new ArchiveIndexer(store, decoder),
+            decoder,
+            new FileRouter(store, decoder, new FileRouterTests.FakeRecycleBinService()),
+            TimeSpan.Zero);
+        Assert.False(Directory.Exists(archiveRoot));
+
+        var result = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+
+        Assert.True(Directory.Exists(archiveRoot));
+        Assert.Empty(result.Errors);
+        Assert.Equal(1, result.MovedUnique);
+        Assert.True(File.Exists(Path.Combine(archiveRoot, "unique.png")));
+    }
 }
