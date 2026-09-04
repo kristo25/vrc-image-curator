@@ -1,0 +1,78 @@
+using VrcImageCurator.App.Services;
+using VrcImageCurator.Core.Models;
+
+namespace VrcImageCurator.Tests.Services;
+
+public sealed class SettingsDraftTests
+{
+    [Fact]
+    public void ApplyUsesOneOutputRootAndOnlyStalesChangedCategories()
+    {
+        using var directory = new TestDirectory();
+        var state = AppStateDefaults.Create(directory.GetPath("profile"), directory.GetPath("local"));
+        foreach (var index in state.ArchiveIndex.Categories)
+        {
+            index.Status = IndexStatus.Current;
+        }
+
+        var originalOutput = state.Settings.OutputRootPath;
+        var emoji = state.Settings.CategoryMappings.Single(item => item.Category == VrcImageCategory.Emoji);
+        var changedSource = directory.GetPath("emoji-new");
+        var draft = new SettingsDraft(
+            state.Settings.CategoryMappings.Select(mapping => new CategorySettingsDraft(
+                    mapping.Category,
+                    mapping.Category == VrcImageCategory.Emoji ? changedSource : mapping.SourcePath,
+                    mapping.Category == VrcImageCategory.Emoji))
+                .ToArray(),
+            originalOutput,
+            SimilarityProfile.Broad,
+            StartWithWindows: true,
+            BringReviewForwardWhenHeld: false);
+
+        draft.ApplyTo(state);
+
+        Assert.Equal(Path.GetFullPath(changedSource), emoji.SourcePath);
+        Assert.All(
+            state.Settings.CategoryMappings,
+            mapping => Assert.Equal(Path.Combine(originalOutput, mapping.Category.ToString()), mapping.ArchivePath));
+        Assert.Equal(IndexStatus.Stale, state.ArchiveIndex.Categories.Single(item => item.Category == VrcImageCategory.Emoji).Status);
+        Assert.All(
+            state.ArchiveIndex.Categories.Where(item => item.Category != VrcImageCategory.Emoji),
+            index => Assert.Equal(IndexStatus.Current, index.Status));
+        Assert.Equal(SimilarityProfile.Broad, state.Settings.SimilarityProfile);
+        Assert.True(state.Settings.Automation.StartWithWindows);
+        Assert.False(state.Settings.BringReviewForwardWhenHeld);
+    }
+
+    [Fact]
+    public void ChangingOutputRootStalesAllIndexesAndRetainsOldArchivesAsLegacy()
+    {
+        using var directory = new TestDirectory();
+        var state = AppStateDefaults.Create(directory.GetPath("profile"), directory.GetPath("local"));
+        foreach (var index in state.ArchiveIndex.Categories)
+        {
+            index.Status = IndexStatus.Current;
+        }
+
+        var oldArchives = state.Settings.CategoryMappings.ToDictionary(item => item.Category, item => item.ArchivePath);
+        var newRoot = directory.GetPath("VRC Images");
+        var draft = new SettingsDraft(
+            state.Settings.CategoryMappings.Select(
+                    mapping => new CategorySettingsDraft(mapping.Category, mapping.SourcePath, mapping.IsEnabled))
+                .ToArray(),
+            newRoot,
+            SimilarityProfile.Conservative,
+            StartWithWindows: false,
+            BringReviewForwardWhenHeld: true);
+
+        draft.ApplyTo(state);
+
+        Assert.Equal(Path.GetFullPath(newRoot), state.Settings.OutputRootPath);
+        Assert.All(state.ArchiveIndex.Categories, index => Assert.Equal(IndexStatus.Stale, index.Status));
+        Assert.All(
+            oldArchives,
+            pair => Assert.Contains(
+                state.Settings.LegacyArchiveMappings,
+                legacy => legacy.Category == pair.Key && legacy.ArchivePath == pair.Value));
+    }
+}

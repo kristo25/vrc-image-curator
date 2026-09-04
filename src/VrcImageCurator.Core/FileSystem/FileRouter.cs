@@ -1,0 +1,871 @@
+using VrcImageCurator.Core.Imaging;
+using VrcImageCurator.Core.Models;
+using VrcImageCurator.Core.Storage;
+
+namespace VrcImageCurator.Core.FileSystem;
+
+public sealed record FileRouteResult(Guid OperationId, string? DestinationPath);
+
+public sealed record KeepIncomingResult(bool ReviewResolved, string? PreservedMatchPath);
+
+public sealed record ReviewRestoreProgress(int Processed, int Total, int Restored);
+
+public sealed record ReviewRestoreResult(
+    int Requested,
+    int Restored,
+    IReadOnlyList<string> Failures);
+
+public sealed class FileRouter
+{
+    private readonly JsonStateStore _stateStore;
+    private readonly OperationJournal _journal;
+    private readonly ImageDecoder _decoder;
+    private readonly IRecycleBinService _recycleBin;
+    private readonly TimeProvider _timeProvider;
+
+    public FileRouter(
+        JsonStateStore stateStore,
+        ImageDecoder decoder,
+        IRecycleBinService recycleBin,
+        TimeProvider? timeProvider = null)
+    {
+        _stateStore = stateStore ?? throw new ArgumentNullException(nameof(stateStore));
+        _decoder = decoder ?? throw new ArgumentNullException(nameof(decoder));
+        _recycleBin = recycleBin ?? throw new ArgumentNullException(nameof(recycleBin));
+        _timeProvider = timeProvider ?? TimeProvider.System;
+        _journal = new OperationJournal(stateStore, _timeProvider);
+    }
+
+    public async Task<FileRouteResult> HoldForReviewAsync(
+        string sourcePath,
+        ReviewItem reviewItem,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(reviewItem);
+        var state = await _stateStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+        var destination = CreateCollisionSafePath(
+            Path.Combine(state.Settings.HoldingRootPath, reviewItem.Category.ToString(), Path.GetFileName(sourcePath)));
+        reviewItem.HeldFilePath = destination;
+        var entry = CreateMoveEntry(
+            sourcePath,
+            destination,
+            reviewItem.Category,
+            reviewItem.IncomingFingerprint,
+            JournalOperationPurpose.HoldForReview);
+        entry.ReviewItemId = reviewItem.Id;
+        entry.ReviewItemAfterCommit = reviewItem;
+        entry.RoutingContext = reviewItem.RoutingContext;
+        return await ExecuteMoveAsync(entry, cancellationToken).ConfigureAwait(false);
+    }
+
+    public Task QueueForReviewAsync(
+        ReviewItem reviewItem,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(reviewItem);
+        if (!reviewItem.IsIncomingInPlace)
+        {
+            throw new InvalidOperationException("An in-place review must reference its original incoming file.");
+        }
+
+        return _stateStore.UpdateAsync(
+            state =>
+            {
+                var index = state.ArchiveIndex.Categories.Single(item => item.Category == reviewItem.Category);
+                if (index.Status != IndexStatus.Current || index.Generation != reviewItem.IndexGeneration)
+                {
+                    throw new InvalidOperationException("The archive index changed before the review was queued.");
+                }
+
+                if (state.ReviewQueue.Any(
+                        item => item.Status != ReviewStatus.Resolved
+                            && string.Equals(
+                                item.IncomingOriginalPath,
+                                reviewItem.IncomingOriginalPath,
+                                StringComparison.OrdinalIgnoreCase)))
+                {
+                    return false;
+                }
+
+                state.ReviewQueue.Add(reviewItem);
+                state.History.Add(new ActivityEntry
+                {
+                    Id = Guid.NewGuid(),
+                    OccurredUtc = _timeProvider.GetUtcNow(),
+                    Kind = ActivityKind.ReviewDecision,
+                    Level = ActivityLevel.Information,
+                    Category = reviewItem.Category,
+                    Message = "Queued incoming image for review.",
+                    SourcePath = reviewItem.IncomingOriginalPath,
+                });
+                return true;
+            },
+            cancellationToken);
+    }
+
+    public async Task<FileRouteResult> MoveUniqueAsync(
+        string sourcePath,
+        VrcImageCategory category,
+        ImageFingerprint fingerprint,
+        ScanRoutingContext? routingContext = null,
+        Guid? reviewItemId = null,
+        bool duplicateOverride = false,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(fingerprint);
+        var destination = await BuildArchiveDestinationAsync(sourcePath, category, routingContext, cancellationToken)
+            .ConfigureAwait(false);
+        var entry = CreateMoveEntry(
+            sourcePath,
+            destination,
+            category,
+            fingerprint.ExactIdentity,
+            duplicateOverride
+                ? JournalOperationPurpose.MoveDuplicateOverride
+                : JournalOperationPurpose.MoveUnique);
+        entry.ReviewItemId = reviewItemId;
+        entry.RoutingContext = routingContext;
+        entry.IndexedImageAfterCommit = CreateIndexedRecord(category, destination, sourcePath, fingerprint);
+        return await ExecuteMoveAsync(entry, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task KeepExistingAsync(
+        ReviewItem reviewItem,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(reviewItem);
+        var entry = CreateRecycleEntry(
+            reviewItem.HeldFilePath,
+            reviewItem.Category,
+            reviewItem.IncomingFingerprint,
+            JournalOperationPurpose.KeepExisting);
+        entry.ReviewItemId = reviewItem.Id;
+        await ExecuteRecycleAsync(entry, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task KeepMatchAsync(
+        ReviewItem reviewItem,
+        ReviewCandidate candidate,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(reviewItem);
+        ArgumentNullException.ThrowIfNull(candidate);
+        await VerifyImageFingerprintAsync(
+                candidate.ArchivePath,
+                candidate.ExpectedFingerprint,
+                "The archive match changed after it was scanned. No file operation was performed.",
+                cancellationToken)
+            .ConfigureAwait(false);
+        await KeepExistingAsync(reviewItem, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<KeepIncomingResult> KeepIncomingOverMatchAsync(
+        ReviewItem reviewItem,
+        ReviewCandidate candidate,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(reviewItem);
+        ArgumentNullException.ThrowIfNull(candidate);
+        if (reviewItem.IncomingImageFingerprint is null)
+        {
+            throw new InvalidOperationException("The incoming fingerprint is missing. Run a new scan.");
+        }
+
+        await VerifyImageFingerprintAsync(
+                reviewItem.HeldFilePath,
+                reviewItem.IncomingImageFingerprint.ExactIdentity,
+                "The held incoming image changed after it was scanned. No file operation was performed.",
+                cancellationToken)
+            .ConfigureAwait(false);
+        await VerifyImageFingerprintAsync(
+                candidate.ArchivePath,
+                candidate.ExpectedFingerprint,
+                "The archive match changed after it was scanned. No file operation was performed.",
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        var state = await _stateStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+        var current = state.ReviewQueue.Single(item => item.Id == reviewItem.Id);
+        var currentCandidate = current.Candidates.Single(item => item.Id == candidate.Id);
+        if (current.Candidates.Count > 1)
+        {
+            var preservedPath = await RemoveArchiveCandidateAsync(current, currentCandidate, cancellationToken)
+                .ConfigureAwait(false);
+            return new KeepIncomingResult(false, preservedPath);
+        }
+
+        if (current.IncomingImageFingerprint is null)
+        {
+            throw new InvalidOperationException("The incoming fingerprint is missing. Run a new scan.");
+        }
+
+        await MoveUniqueAsync(
+                current.HeldFilePath,
+                current.Category,
+                current.IncomingImageFingerprint,
+                current.RoutingContext,
+                reviewItemId: current.Id,
+                duplicateOverride: true,
+                cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        var finalPreservedPath = await RemoveArchiveCandidateAsync(current, currentCandidate, cancellationToken)
+            .ConfigureAwait(false);
+        return new KeepIncomingResult(true, finalPreservedPath);
+    }
+
+    private async Task<string?> RemoveArchiveCandidateAsync(
+        ReviewItem reviewItem,
+        ReviewCandidate candidate,
+        CancellationToken cancellationToken)
+    {
+        if (_recycleBin.CanRecycle(candidate.ArchivePath))
+        {
+            await DeleteArchiveCandidateAsync(reviewItem, candidate, cancellationToken).ConfigureAwait(false);
+            return null;
+        }
+
+        var state = await _stateStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+        var archiveRoots = state.Settings.LegacyArchiveMappings
+            .Where(item => item.Category == reviewItem.Category)
+            .Select(item => item.ArchivePath)
+            .Prepend(state.Settings.CategoryMappings.Single(item => item.Category == reviewItem.Category).ArchivePath)
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(PathBoundary.Normalize)
+            .Where(path => PathBoundary.Contains(path, candidate.ArchivePath))
+            .OrderByDescending(path => path.Length)
+            .ToArray();
+        var archiveRoot = archiveRoots.FirstOrDefault();
+        var recoveryBase = archiveRoot is null
+            ? state.Settings.OutputRootPath
+            : Path.GetDirectoryName(archiveRoot)
+                ?? throw new InvalidOperationException("The archive folder has no parent folder.");
+        var relativePath = archiveRoot is null
+            ? Path.GetFileName(candidate.ArchivePath)
+            : Path.GetRelativePath(archiveRoot, candidate.ArchivePath);
+        var recoveryRoot = Path.Combine(recoveryBase, "VRC Image Curator Replaced", reviewItem.Category.ToString());
+        var destination = CreateCollisionSafePath(Path.Combine(recoveryRoot, relativePath));
+        PathBoundary.EnsureContained(recoveryRoot, destination, "Preserved archive match");
+        var entry = CreateMoveEntry(
+            candidate.ArchivePath,
+            destination,
+            reviewItem.Category,
+            candidate.ExpectedFingerprint,
+            JournalOperationPurpose.PreserveArchiveCandidate);
+        entry.ReviewItemId = reviewItem.Id;
+        entry.IndexedImageId = candidate.IndexedImageId;
+        var result = await ExecuteMoveAsync(entry, cancellationToken).ConfigureAwait(false);
+        return result.DestinationPath;
+    }
+
+    public async Task<FileRouteResult> RestoreReviewAsync(
+        ReviewItem reviewItem,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(reviewItem);
+        if (reviewItem.IsIncomingInPlace)
+        {
+            await DismissReviewAsync(reviewItem.Id, cancellationToken).ConfigureAwait(false);
+            return new FileRouteResult(Guid.Empty, reviewItem.IncomingOriginalPath);
+        }
+
+        var requestedDestination = Path.GetFullPath(reviewItem.IncomingOriginalPath);
+        if (!string.IsNullOrWhiteSpace(reviewItem.RoutingContext.SourceRootPath))
+        {
+            PathBoundary.EnsureContained(
+                reviewItem.RoutingContext.SourceRootPath,
+                requestedDestination,
+                "Restored image destination");
+        }
+
+        var destination = CreateCollisionSafePath(requestedDestination);
+        var entry = CreateMoveEntry(
+            reviewItem.HeldFilePath,
+            destination,
+            reviewItem.Category,
+            reviewItem.IncomingFingerprint,
+            JournalOperationPurpose.RestoreReviewToSource);
+        entry.ReviewItemId = reviewItem.Id;
+        entry.RoutingContext = reviewItem.RoutingContext;
+        return await ExecuteMoveAsync(entry, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<ReviewRestoreResult> RestoreReviewsAsync(
+        IReadOnlyCollection<ReviewItem> reviews,
+        IProgress<ReviewRestoreProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(reviews);
+        var pending = reviews.ToArray();
+        var failures = new List<string>();
+        var processed = 0;
+        var restored = 0;
+        progress?.Report(new ReviewRestoreProgress(processed, pending.Length, restored));
+
+        var inPlace = pending.Where(review => review.IsIncomingInPlace).ToArray();
+        if (inPlace.Length > 0)
+        {
+            try
+            {
+                var reviewIds = inPlace.Select(review => review.Id).ToHashSet();
+                await _stateStore.UpdateAsync(
+                        state =>
+                        {
+                            foreach (var review in state.ReviewQueue.Where(item => reviewIds.Contains(item.Id)))
+                            {
+                                review.Status = ReviewStatus.Resolved;
+                                review.HeldFilePath = string.Empty;
+                            }
+
+                            state.History.Add(new ActivityEntry
+                            {
+                                Id = Guid.NewGuid(),
+                                OccurredUtc = _timeProvider.GetUtcNow(),
+                                Kind = ActivityKind.ReviewDecision,
+                                Level = ActivityLevel.Information,
+                                Message = $"Cleared {inPlace.Length} in-place review item(s) without changing their files.",
+                            });
+                            return true;
+                        },
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                restored += inPlace.Length;
+            }
+            catch (Exception exception) when (
+                exception is IOException
+                    or UnauthorizedAccessException
+                    or InvalidOperationException
+                    or NotSupportedException)
+            {
+                failures.AddRange(inPlace.Select(
+                    review => $"{review.IncomingOriginalPath}: {exception.Message}"));
+            }
+            finally
+            {
+                foreach (var _ in inPlace)
+                {
+                    processed++;
+                    progress?.Report(new ReviewRestoreProgress(processed, pending.Length, restored));
+                }
+            }
+        }
+
+        foreach (var review in pending.Where(review => !review.IsIncomingInPlace))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                await RestoreReviewAsync(review, cancellationToken).ConfigureAwait(false);
+                restored++;
+            }
+            catch (Exception exception) when (
+                exception is IOException
+                    or UnauthorizedAccessException
+                    or InvalidOperationException
+                    or NotSupportedException)
+            {
+                failures.Add($"{review.HeldFilePath}: {exception.Message}");
+            }
+            finally
+            {
+                processed++;
+                progress?.Report(new ReviewRestoreProgress(processed, pending.Length, restored));
+            }
+        }
+
+        return new ReviewRestoreResult(pending.Length, restored, failures);
+    }
+
+    public Task DismissReviewAsync(Guid reviewItemId, CancellationToken cancellationToken = default)
+    {
+        if (reviewItemId == Guid.Empty)
+        {
+            throw new ArgumentException("A review ID is required.", nameof(reviewItemId));
+        }
+
+        return _stateStore.UpdateAsync(
+            state =>
+            {
+                var review = state.ReviewQueue.SingleOrDefault(item => item.Id == reviewItemId);
+                if (review is null)
+                {
+                    return false;
+                }
+
+                review.Status = ReviewStatus.Resolved;
+                review.HeldFilePath = string.Empty;
+                state.History.Add(new ActivityEntry
+                {
+                    Id = Guid.NewGuid(),
+                    OccurredUtc = _timeProvider.GetUtcNow(),
+                    Kind = ActivityKind.ReviewDecision,
+                    Level = ActivityLevel.Information,
+                    Category = review.Category,
+                    Message = "Removed image from the review queue without changing its file.",
+                    SourcePath = review.IncomingOriginalPath,
+                });
+                return true;
+            },
+            cancellationToken);
+    }
+
+    public async Task DeleteArchiveCandidateAsync(
+        ReviewItem reviewItem,
+        ReviewCandidate candidate,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(reviewItem);
+        ArgumentNullException.ThrowIfNull(candidate);
+        var entry = CreateRecycleEntry(
+            candidate.ArchivePath,
+            reviewItem.Category,
+            candidate.ExpectedFingerprint,
+            JournalOperationPurpose.DeleteArchiveCandidate);
+        entry.ReviewItemId = reviewItem.Id;
+        entry.IndexedImageId = candidate.IndexedImageId;
+        await ExecuteRecycleAsync(entry, cancellationToken).ConfigureAwait(false);
+    }
+
+    public bool CanRecycle(string path) => _recycleBin.CanRecycle(path);
+
+    public async Task<IReadOnlyList<JournalReconciliationDecision>> RecoverPendingOperationsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var state = await _stateStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+        var decisions = new List<JournalReconciliationDecision>();
+        foreach (var entry in state.OperationJournal.Where(item => item.Phase != JournalPhase.Completed).ToArray())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var observation = await ObserveAsync(entry, cancellationToken).ConfigureAwait(false);
+            var decision = OperationJournal.Reconcile(entry, observation);
+            decisions.Add(decision);
+            try
+            {
+                switch (decision.Action)
+                {
+                    case JournalReconciliationAction.RetrySideEffect:
+                        if (entry.Phase is JournalPhase.IntentRecorded or JournalPhase.NeedsAttention)
+                        {
+                            await _journal.AdvanceAsync(entry.Id, JournalPhase.SideEffectStarted, cancellationToken: cancellationToken)
+                                .ConfigureAwait(false);
+                        }
+
+                        await ApplySideEffectAsync(entry, cancellationToken).ConfigureAwait(false);
+                        await _journal.AdvanceAsync(entry.Id, JournalPhase.SideEffectApplied, cancellationToken: cancellationToken)
+                            .ConfigureAwait(false);
+                        await CommitMutationAsync(entry.Id, cancellationToken).ConfigureAwait(false);
+                        await _journal.AdvanceAsync(entry.Id, JournalPhase.Completed, cancellationToken: cancellationToken)
+                            .ConfigureAwait(false);
+                        break;
+                    case JournalReconciliationAction.CommitState:
+                        await CommitMutationAsync(entry.Id, cancellationToken).ConfigureAwait(false);
+                        await _journal.AdvanceAsync(entry.Id, JournalPhase.Completed, cancellationToken: cancellationToken)
+                            .ConfigureAwait(false);
+                        break;
+                    case JournalReconciliationAction.MarkCompleted:
+                        await _journal.AdvanceAsync(entry.Id, JournalPhase.Completed, cancellationToken: cancellationToken)
+                            .ConfigureAwait(false);
+                        break;
+                    case JournalReconciliationAction.NeedsAttention:
+                        if (entry.Phase != JournalPhase.NeedsAttention)
+                        {
+                            await _journal.AdvanceAsync(
+                                    entry.Id,
+                                    JournalPhase.NeedsAttention,
+                                    decision.Reason,
+                                    cancellationToken)
+                                .ConfigureAwait(false);
+                        }
+
+                        break;
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+            {
+                await MarkNeedsAttentionAsync(entry.Id, exception.Message, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        return decisions;
+    }
+
+    public Task<int> DismissNeedsAttentionOperationsAsync(CancellationToken cancellationToken = default) =>
+        _stateStore.UpdateAsync(
+            state =>
+            {
+                var entries = state.OperationJournal
+                    .Where(item => item.Phase == JournalPhase.NeedsAttention)
+                    .ToArray();
+                foreach (var entry in entries)
+                {
+                    var index = state.ArchiveIndex.Categories.Single(item => item.Category == entry.Category);
+                    index.Status = IndexStatus.Stale;
+                    index.LastError = "A recovery operation was dismissed; rebuild required.";
+                    entry.Phase = JournalPhase.Completed;
+                    entry.UpdatedUtc = _timeProvider.GetUtcNow();
+                    state.History.Add(new ActivityEntry
+                    {
+                        Id = Guid.NewGuid(),
+                        OccurredUtc = _timeProvider.GetUtcNow(),
+                        Kind = ActivityKind.Warning,
+                        Level = ActivityLevel.Warning,
+                        Category = entry.Category,
+                        Message = "Dismissed an ambiguous recovery operation without changing either file.",
+                        SourcePath = entry.SourcePath,
+                        DestinationPath = entry.DestinationPath,
+                        OperationId = entry.Id,
+                    });
+                }
+
+                return entries.Length;
+            },
+            cancellationToken);
+
+    private async Task<FileRouteResult> ExecuteMoveAsync(
+        JournalEntry entry,
+        CancellationToken cancellationToken)
+    {
+        await VerifyExpectedSourceAsync(entry, cancellationToken).ConfigureAwait(false);
+        await _journal.RecordIntentAsync(entry, cancellationToken).ConfigureAwait(false);
+        await _journal.AdvanceAsync(entry.Id, JournalPhase.SideEffectStarted, cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        await VerifyExpectedSourceAsync(entry, cancellationToken).ConfigureAwait(false);
+        await ApplySideEffectAsync(entry, cancellationToken).ConfigureAwait(false);
+        await _journal.AdvanceAsync(entry.Id, JournalPhase.SideEffectApplied, cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        await CommitMutationAsync(entry.Id, cancellationToken).ConfigureAwait(false);
+        await _journal.AdvanceAsync(entry.Id, JournalPhase.Completed, cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        return new FileRouteResult(entry.Id, entry.DestinationPath);
+    }
+
+    private async Task ExecuteRecycleAsync(JournalEntry entry, CancellationToken cancellationToken)
+    {
+        if (!_recycleBin.CanRecycle(entry.SourcePath))
+        {
+            throw new NotSupportedException("Windows Recycle Bin behavior is unavailable for this path.");
+        }
+
+        await VerifyExpectedSourceAsync(entry, cancellationToken).ConfigureAwait(false);
+        await _journal.RecordIntentAsync(entry, cancellationToken).ConfigureAwait(false);
+        await _journal.AdvanceAsync(entry.Id, JournalPhase.SideEffectStarted, cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        await VerifyExpectedSourceAsync(entry, cancellationToken).ConfigureAwait(false);
+        await ApplySideEffectAsync(entry, cancellationToken).ConfigureAwait(false);
+        await _journal.AdvanceAsync(entry.Id, JournalPhase.SideEffectApplied, cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        await CommitMutationAsync(entry.Id, cancellationToken).ConfigureAwait(false);
+        await _journal.AdvanceAsync(entry.Id, JournalPhase.Completed, cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task ApplySideEffectAsync(JournalEntry entry, CancellationToken cancellationToken)
+    {
+        if (entry.OperationType == JournalOperationType.Recycle)
+        {
+            await _recycleBin.RecycleAsync(entry.SourcePath, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        PathBoundary.EnsureNoReparsePoints(entry.DestinationPath!, "Image destination");
+        Directory.CreateDirectory(Path.GetDirectoryName(entry.DestinationPath!)!);
+        File.Move(entry.SourcePath, entry.DestinationPath!, overwrite: false);
+    }
+
+    private Task VerifyExpectedSourceAsync(JournalEntry entry, CancellationToken cancellationToken) =>
+        VerifyImageFingerprintAsync(
+            entry.SourcePath,
+            entry.ExpectedSource.Fingerprint,
+            "The source image changed after it was scanned. No file operation was performed.",
+            cancellationToken);
+
+    private async Task VerifyImageFingerprintAsync(
+        string path,
+        string expectedFingerprint,
+        string errorMessage,
+        CancellationToken cancellationToken)
+    {
+        PathBoundary.EnsureNoReparsePoints(path, "Image");
+        var decoded = await _decoder.DecodeAsync(path, cancellationToken).ConfigureAwait(false);
+        if (!decoded.IsSuccess
+            || ImageFingerprint.Create(decoded.Image!).ExactIdentity != expectedFingerprint)
+        {
+            throw new InvalidOperationException(errorMessage);
+        }
+    }
+
+    private Task CommitMutationAsync(Guid operationId, CancellationToken cancellationToken) =>
+        _stateStore.UpdateAsync(
+            state =>
+            {
+                var entry = state.OperationJournal.Single(item => item.Id == operationId);
+                ApplyMutation(state, entry);
+                entry.Phase = JournalPhase.StateCommitted;
+                entry.UpdatedUtc = _timeProvider.GetUtcNow();
+                entry.LastError = null;
+                state.History.Add(CreateActivity(entry));
+                return true;
+            },
+            cancellationToken);
+
+    private static void ApplyMutation(AppStateDocument state, JournalEntry entry)
+    {
+        var index = state.ArchiveIndex.Categories.Single(item => item.Category == entry.Category);
+        switch (entry.Purpose)
+        {
+            case JournalOperationPurpose.HoldForReview:
+                if (!state.ReviewQueue.Any(item => item.Id == entry.ReviewItemId))
+                {
+                    state.ReviewQueue.Add(entry.ReviewItemAfterCommit!);
+                }
+
+                break;
+            case JournalOperationPurpose.MoveUnique:
+            case JournalOperationPurpose.MoveDuplicateOverride:
+                if (entry.IndexedImageAfterCommit is not null
+                    && !index.Images.Any(item => item.Id == entry.IndexedImageAfterCommit.Id))
+                {
+                    index.Images.Add(entry.IndexedImageAfterCommit);
+                    index.Generation++;
+                }
+
+                ResolveReview(state, entry.ReviewItemId);
+                break;
+            case JournalOperationPurpose.KeepExisting:
+            case JournalOperationPurpose.RestoreReviewToSource:
+                ResolveReview(state, entry.ReviewItemId);
+                break;
+            case JournalOperationPurpose.DeleteArchiveCandidate:
+            case JournalOperationPurpose.PreserveArchiveCandidate:
+                index.Images.RemoveAll(item => item.Id == entry.IndexedImageId);
+                var review = state.ReviewQueue.SingleOrDefault(item => item.Id == entry.ReviewItemId);
+                review?.Candidates.RemoveAll(item => item.IndexedImageId == entry.IndexedImageId);
+                index.Generation++;
+                break;
+        }
+    }
+
+    private static void ResolveReview(AppStateDocument state, Guid? reviewItemId)
+    {
+        if (reviewItemId is null)
+        {
+            return;
+        }
+
+        var review = state.ReviewQueue.SingleOrDefault(item => item.Id == reviewItemId);
+        if (review is not null)
+        {
+            review.Status = ReviewStatus.Resolved;
+            review.HeldFilePath = string.Empty;
+        }
+    }
+
+    private ActivityEntry CreateActivity(JournalEntry entry) =>
+        new()
+        {
+            Id = Guid.NewGuid(),
+            OccurredUtc = _timeProvider.GetUtcNow(),
+            Kind = entry.Purpose switch
+            {
+                JournalOperationPurpose.MoveUnique => ActivityKind.AutomaticMove,
+                JournalOperationPurpose.DeleteArchiveCandidate => ActivityKind.DeletionRequested,
+                _ => ActivityKind.ReviewDecision,
+            },
+            Level = ActivityLevel.Information,
+            Category = entry.Category,
+            Message = entry.Purpose.ToString(),
+            SourcePath = entry.SourcePath,
+            DestinationPath = entry.DestinationPath,
+            OperationId = entry.Id,
+        };
+
+    private async Task<string> BuildArchiveDestinationAsync(
+        string sourcePath,
+        VrcImageCategory category,
+        ScanRoutingContext? routingContext,
+        CancellationToken cancellationToken)
+    {
+        var state = await _stateStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+        var mapping = state.Settings.CategoryMappings.Single(item => item.Category == category);
+        if (!Directory.Exists(mapping.ArchivePath))
+        {
+            throw new DirectoryNotFoundException($"The {category} output folder is unavailable.");
+        }
+
+        if (routingContext is null
+            || string.IsNullOrWhiteSpace(routingContext.SourceRootPath)
+            || string.IsNullOrWhiteSpace(routingContext.OutputRootPath))
+        {
+            routingContext = new ScanRoutingContext
+            {
+                SourceRootPath = mapping.SourcePath,
+                RelativeDirectory = GetRelativeDirectory(mapping.SourcePath, sourcePath),
+                OutputRootPath = state.Settings.OutputRootPath,
+            };
+        }
+
+        var outputRoot = PathBoundary.Normalize(routingContext.OutputRootPath);
+        var categoryRoot = Path.Combine(outputRoot, category.ToString());
+        var relativeDirectory = routingContext.RelativeDirectory;
+        if (Path.IsPathRooted(relativeDirectory)
+            || relativeDirectory.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                .Any(part => part == ".."))
+        {
+            throw new InvalidOperationException("The stored relative image path is unsafe.");
+        }
+
+        var destinationFolder = string.IsNullOrWhiteSpace(relativeDirectory) || relativeDirectory == "."
+            ? categoryRoot
+            : Path.Combine(categoryRoot, relativeDirectory);
+        PathBoundary.EnsureContained(categoryRoot, destinationFolder, "Image destination");
+        PathBoundary.EnsureContained(outputRoot, destinationFolder, "Image destination");
+        PathBoundary.EnsureNoReparsePoints(destinationFolder, "Image destination");
+
+        return CreateCollisionSafePath(Path.Combine(destinationFolder, Path.GetFileName(sourcePath)));
+    }
+
+    private static string GetRelativeDirectory(string sourceRoot, string sourcePath)
+    {
+        var directory = Path.GetDirectoryName(sourcePath)
+            ?? throw new InvalidOperationException("The source file has no parent folder.");
+        PathBoundary.EnsureContained(sourceRoot, sourcePath, "Source image");
+        var relative = Path.GetRelativePath(PathBoundary.Normalize(sourceRoot), directory);
+        return relative == "." ? string.Empty : relative;
+    }
+
+    private JournalEntry CreateMoveEntry(
+        string source,
+        string destination,
+        VrcImageCategory category,
+        string fingerprint,
+        JournalOperationPurpose purpose) =>
+        new()
+        {
+            Id = Guid.NewGuid(),
+            Purpose = purpose,
+            OperationType = JournalOperationType.Move,
+            Category = category,
+            SourcePath = source,
+            DestinationPath = destination,
+            ExpectedSource = CreateExpectedIdentity(source, fingerprint),
+        };
+
+    private JournalEntry CreateRecycleEntry(
+        string source,
+        VrcImageCategory category,
+        string fingerprint,
+        JournalOperationPurpose purpose) =>
+        new()
+        {
+            Id = Guid.NewGuid(),
+            Purpose = purpose,
+            OperationType = JournalOperationType.Recycle,
+            Category = category,
+            SourcePath = source,
+            ExpectedSource = CreateExpectedIdentity(source, fingerprint),
+        };
+
+    private static ExpectedFileIdentity CreateExpectedIdentity(string path, string fingerprint)
+    {
+        var info = new FileInfo(path);
+        return new ExpectedFileIdentity
+        {
+            Fingerprint = fingerprint,
+            FileSize = info.Length,
+            LastWriteUtc = info.LastWriteTimeUtc,
+        };
+    }
+
+    private static IndexedImageRecord CreateIndexedRecord(
+        VrcImageCategory category,
+        string destination,
+        string source,
+        ImageFingerprint fingerprint)
+    {
+        var info = new FileInfo(source);
+        return new IndexedImageRecord
+        {
+            Id = Guid.NewGuid(),
+            Category = category,
+            Path = destination,
+            FileSize = info.Length,
+            LastWriteUtc = info.LastWriteTimeUtc,
+            Width = fingerprint.Width,
+            Height = fingerprint.Height,
+            ExactFingerprint = fingerprint.ExactIdentity,
+            PerceptualFingerprint = fingerprint.PerceptualFrames[0].DifferenceHash,
+            Fingerprint = fingerprint,
+        };
+    }
+
+    private static string CreateCollisionSafePath(string requestedPath)
+    {
+        if (!File.Exists(requestedPath))
+        {
+            return requestedPath;
+        }
+
+        var directory = Path.GetDirectoryName(requestedPath)!;
+        var name = Path.GetFileNameWithoutExtension(requestedPath);
+        var extension = Path.GetExtension(requestedPath);
+        for (var suffix = 2; ; suffix++)
+        {
+            var candidate = Path.Combine(directory, $"{name} ({suffix}){extension}");
+            if (!File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+    }
+
+    private async Task<JournalFileObservation> ObserveAsync(
+        JournalEntry entry,
+        CancellationToken cancellationToken)
+    {
+        var source = await ObservePathAsync(entry.SourcePath, entry.ExpectedSource.Fingerprint, cancellationToken)
+            .ConfigureAwait(false);
+        if (entry.OperationType == JournalOperationType.Recycle)
+        {
+            return new JournalFileObservation(source);
+        }
+
+        var destination = await ObservePathAsync(
+                entry.DestinationPath!,
+                entry.ExpectedSource.Fingerprint,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return new JournalFileObservation(source, destination);
+    }
+
+    private async Task<JournalPathState> ObservePathAsync(
+        string path,
+        string expectedFingerprint,
+        CancellationToken cancellationToken)
+    {
+        if (!File.Exists(path))
+        {
+            return JournalPathState.Missing;
+        }
+
+        var decoded = await _decoder.DecodeAsync(path, cancellationToken).ConfigureAwait(false);
+        if (!decoded.IsSuccess)
+        {
+            return JournalPathState.DifferentFile;
+        }
+
+        return ImageFingerprint.Create(decoded.Image!).ExactIdentity == expectedFingerprint
+            ? JournalPathState.ExpectedFile
+            : JournalPathState.DifferentFile;
+    }
+
+    private Task MarkNeedsAttentionAsync(Guid operationId, string error, CancellationToken cancellationToken) =>
+        _stateStore.UpdateAsync(
+            state =>
+            {
+                var entry = state.OperationJournal.Single(item => item.Id == operationId);
+                entry.Phase = JournalPhase.NeedsAttention;
+                entry.UpdatedUtc = _timeProvider.GetUtcNow();
+                entry.LastError = error;
+                return true;
+            },
+            cancellationToken);
+}

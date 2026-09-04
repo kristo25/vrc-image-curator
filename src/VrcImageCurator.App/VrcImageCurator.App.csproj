@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationIcon>Assets\VrcImageCurator.ico</ApplicationIcon>
+    <AssemblyName>VrcImageCurator</AssemblyName>
+    <RootNamespace>VrcImageCurator.App</RootNamespace>
+    <Product>VRC Image Curator</Product>
+    <Title>VRC Image Curator</Title>
+    <AssemblyTitle>VRC Image Curator</AssemblyTitle>
+    <Description>Local duplicate and similar-image review for VRCX collections.</Description>
+    <Authors>kristo25</Authors>
+    <Company>kristo25</Company>
+    <Version>1.2.0</Version>
+    <FileVersion>1.2.0.0</FileVersion>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\VrcImageCurator.Core\VrcImageCurator.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\VrcImageCurator.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\LICENSE" Link="LICENSE" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\THIRD-PARTY-NOTICES.md" Link="THIRD-PARTY-NOTICES.md" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\README.md" Link="README.md" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <Target Name="RemovePublishSymbols" AfterTargets="Publish">
+    <ItemGroup>
+      <PublishSymbols Include="$(PublishDir)**\*.pdb" />
+    </ItemGroup>
+    <Delete Files="@(PublishSymbols)" />
+  </Target>
+</Project>

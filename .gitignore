@@ -1,0 +1,8 @@
+**/bin/
+**/obj/
+.vs/
+TestResults/
+/publish/
+/publish-v*/
+/artifacts/
+/.live-vrc-test/
