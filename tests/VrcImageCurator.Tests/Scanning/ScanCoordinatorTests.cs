@@ -3,6 +3,7 @@ using VrcImageCurator.Core.FileSystem;
 using VrcImageCurator.Core.Imaging;
 using VrcImageCurator.Core.Models;
 using VrcImageCurator.Core.Scanning;
+using VrcImageCurator.Core.Storage;
 using VrcImageCurator.Tests.FileSystem;
 using VrcImageCurator.Tests.Imaging;
 
@@ -204,7 +205,7 @@ public sealed class ScanCoordinatorTests
 
         var activeScan = coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
         await WaitUntilAsync(() => !File.Exists(incomingPaths[0]), TimeSpan.FromSeconds(5));
-        var watcherRefresh = coordinator.ScanCategoryAfterArchiveChangeAsync(VrcImageCategory.Emoji);
+        var watcherRefresh = coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
         var first = await activeScan;
         var second = await watcherRefresh;
 
@@ -703,5 +704,98 @@ public sealed class ScanCoordinatorTests
         Assert.Empty(result.Errors);
         Assert.Equal(1, result.MovedUnique);
         Assert.True(File.Exists(Path.Combine(archiveRoot, "unique.png")));
+    }
+
+    private static ScanCoordinator CreateCoordinator(JsonStateStore store)
+    {
+        var decoder = new ImageDecoder();
+        return new ScanCoordinator(
+            store,
+            new ArchiveIndexer(store, decoder),
+            decoder,
+            new FileRouter(store, decoder, new FileRouterTests.FakeRecycleBinService()),
+            TimeSpan.Zero);
+    }
+
+    [Fact]
+    public async Task ScanningIncomingPathsAnalyzesOnlyTheNamedFiles()
+    {
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        var arrived = Path.Combine(sourceRoot, "arrived.png");
+        var untouched = Path.Combine(sourceRoot, "untouched.png");
+        using (var image = ImageFixtureFactory.CreatePattern(51))
+        {
+            await image.SaveAsPngAsync(arrived);
+        }
+
+        using (var image = ImageFixtureFactory.CreatePattern(52))
+        {
+            await image.SaveAsPngAsync(untouched);
+        }
+
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var coordinator = CreateCoordinator(store);
+
+        var result = await coordinator.ScanIncomingPathsAsync(VrcImageCategory.Emoji, [arrived]);
+
+        Assert.Empty(result.Errors);
+        Assert.Equal(1, result.Examined);
+        Assert.Equal(1, result.MovedUnique);
+        Assert.True(File.Exists(Path.Combine(archiveRoot, "arrived.png")));
+
+        // The file that was already sitting in the folder is never looked at.
+        Assert.True(File.Exists(untouched));
+        Assert.False(File.Exists(Path.Combine(archiveRoot, "untouched.png")));
+    }
+
+    [Fact]
+    public async Task ScanningIncomingPathsIgnoresPathsOutsideTheSourceFolder()
+    {
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        var elsewhere = directory.GetPath("elsewhere");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        Directory.CreateDirectory(elsewhere);
+        var outside = Path.Combine(elsewhere, "outside.png");
+        using (var image = ImageFixtureFactory.CreatePattern(53))
+        {
+            await image.SaveAsPngAsync(outside);
+        }
+
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var coordinator = CreateCoordinator(store);
+
+        var result = await coordinator.ScanIncomingPathsAsync(VrcImageCategory.Emoji, [outside]);
+
+        Assert.Equal(0, result.Examined);
+        Assert.Equal(0, result.MovedUnique);
+        Assert.True(File.Exists(outside));
+        Assert.Empty(Directory.GetFiles(archiveRoot));
+    }
+
+    [Fact]
+    public async Task ScanningIncomingPathsSkipsUnsupportedFiles()
+    {
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        var video = Path.Combine(sourceRoot, "clip.mp4");
+        await File.WriteAllTextAsync(video, "not an image");
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var coordinator = CreateCoordinator(store);
+
+        var result = await coordinator.ScanIncomingPathsAsync(VrcImageCategory.Emoji, [video]);
+
+        Assert.Equal(0, result.Examined);
+        Assert.Equal(1, result.Skipped);
+        Assert.True(File.Exists(video));
     }
 }

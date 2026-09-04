@@ -125,10 +125,45 @@ public sealed class ScanCoordinator
         CancellationToken cancellationToken = default) =>
         ScanCategoryCoreWithLockAsync(category, cancellationToken);
 
-    public Task<CategoryScanResult> ScanCategoryAfterArchiveChangeAsync(
+    /// <summary>
+    /// Scans only the given incoming paths, ignoring everything else in the source folder.
+    /// Folder watching uses this so a newly added image costs one decode instead of a full
+    /// sweep. Paths outside the category's configured source folder are never processed.
+    /// </summary>
+    public async Task<CategoryScanResult> ScanIncomingPathsAsync(
         VrcImageCategory category,
-        CancellationToken cancellationToken = default) =>
-        ScanCategoryCoreWithLockAsync(category, cancellationToken);
+        IReadOnlyCollection<string> paths,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        await _scanGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var state = await _stateStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+            var sourceRoot = state.Settings.CategoryMappings
+                .Single(item => item.Category == category)
+                .SourcePath;
+            var snapshot = CreateSnapshotFromPaths(sourceRoot, paths);
+            if (snapshot.Error is null && snapshot.Paths.Count == 0)
+            {
+                return new CategoryScanResult(category, 0, 0, 0, snapshot.UnsupportedFiles, []);
+            }
+
+            return await ScanCategoryCoreAsync(
+                    category,
+                    sourceRoot,
+                    requireEnabled: true,
+                    snapshot,
+                    onImageScanned: null,
+                    onImageProcessed: null,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            _scanGate.Release();
+        }
+    }
 
     private async Task<CategoryScanResult> ScanCategoryCoreWithLockAsync(
         VrcImageCategory category,
@@ -463,6 +498,74 @@ public sealed class ScanCoordinator
         }
         catch (Exception exception) when (
             exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            return new SourceSnapshot([], 0, exception.Message);
+        }
+    }
+
+    private static SourceSnapshot CreateSnapshotFromPaths(
+        string sourceRoot,
+        IReadOnlyCollection<string> paths)
+    {
+        if (string.IsNullOrWhiteSpace(sourceRoot))
+        {
+            return SourceSnapshot.Empty;
+        }
+
+        try
+        {
+            var root = PathBoundary.Normalize(sourceRoot);
+            var supported = new List<string>();
+            var unsupported = 0;
+            foreach (var path in paths)
+            {
+                if (string.IsNullOrWhiteSpace(path))
+                {
+                    continue;
+                }
+
+                string full;
+                try
+                {
+                    full = Path.GetFullPath(path);
+                    // Only files inside the configured source folder are ever processed, and
+                    // never through a junction or symlink.
+                    if (!PathBoundary.Contains(root, full) || !File.Exists(full))
+                    {
+                        continue;
+                    }
+
+                    PathBoundary.EnsureNoReparsePoints(full, "Incoming image");
+                }
+                catch (Exception exception) when (
+                    exception is ArgumentException
+                        or NotSupportedException
+                        or PathTooLongException
+                        or InvalidOperationException)
+                {
+                    continue;
+                }
+
+                if (ArchiveIndexer.SupportedExtensions.Contains(Path.GetExtension(full)))
+                {
+                    supported.Add(full);
+                }
+                else
+                {
+                    unsupported++;
+                }
+            }
+
+            return new SourceSnapshot(
+                supported
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Order(StringComparer.OrdinalIgnoreCase)
+                    .ToArray(),
+                unsupported,
+                null);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or ArgumentException)
         {
             return new SourceSnapshot([], 0, exception.Message);
         }

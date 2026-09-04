@@ -190,8 +190,8 @@ public sealed class WatchService : IDisposable
             Filter = "*.*",
             EnableRaisingEvents = false,
         };
-        FileSystemEventHandler changed = (_, _) => Queue(category, archive);
-        RenamedEventHandler renamed = (_, _) => Queue(category, archive);
+        FileSystemEventHandler changed = (_, e) => Queue(category, archive, e.FullPath);
+        RenamedEventHandler renamed = (_, e) => Queue(category, archive, e.FullPath);
         ErrorEventHandler error = (_, _) => HandleWatcherError(watcher, category, archive);
         watcher.Created += changed;
         watcher.Changed += changed;
@@ -210,11 +210,17 @@ public sealed class WatchService : IDisposable
                 DisposeWatchers([watcher]);
             }
 
-            Queue(category, archive);
+            // The watcher buffer overflowed or the handle died, so individual change
+            // notifications were lost. A full sweep is the only safe recovery.
+            Queue(category, archive, path: null, requestFullScan: true);
         }
     }
 
-    private void Queue(VrcImageCategory category, bool archive)
+    private void Queue(
+        VrcImageCategory category,
+        bool archive,
+        string? path,
+        bool requestFullScan = false)
     {
         lock (_sync)
         {
@@ -225,18 +231,33 @@ public sealed class WatchService : IDisposable
 
             if (_pending.TryGetValue(category, out var existing))
             {
-                existing.ArchiveChanged |= archive;
+                Accumulate(existing, archive, path, requestFullScan);
                 existing.Timer.Change(_debounce, Timeout.InfiniteTimeSpan);
                 return;
             }
 
             var pending = new PendingCategory(archive);
+            Accumulate(pending, archive, path, requestFullScan);
             pending.Timer = new System.Threading.Timer(
                 _ => _ = ProcessAsync(category),
                 null,
                 _debounce,
                 Timeout.InfiniteTimeSpan);
             _pending[category] = pending;
+        }
+    }
+
+    private static void Accumulate(
+        PendingCategory pending,
+        bool archive,
+        string? path,
+        bool requestFullScan)
+    {
+        pending.ArchiveChanged |= archive;
+        pending.FullScanRequested |= requestFullScan;
+        if (!archive && !string.IsNullOrWhiteSpace(path))
+        {
+            pending.SourcePaths.Add(path);
         }
     }
 
@@ -291,7 +312,7 @@ public sealed class WatchService : IDisposable
                         }
                     }
 
-                    Queue(target.Category, target.Archive);
+                    Queue(target.Category, target.Archive, path: null);
                 }
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
                 {
@@ -315,7 +336,8 @@ public sealed class WatchService : IDisposable
 
     private async Task ProcessAsync(VrcImageCategory category)
     {
-        bool archiveChanged;
+        bool fullScanRequested;
+        string[] sourcePaths;
         CancellationToken cancellationToken;
         lock (_sync)
         {
@@ -325,7 +347,8 @@ public sealed class WatchService : IDisposable
             }
 
             pending.Timer.Dispose();
-            archiveChanged = pending.ArchiveChanged;
+            fullScanRequested = pending.FullScanRequested;
+            sourcePaths = [.. pending.SourcePaths];
             cancellationToken = _runCancellation.Token;
         }
 
@@ -334,9 +357,26 @@ public sealed class WatchService : IDisposable
         {
             await _scanGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             enteredScanGate = true;
-            var result = archiveChanged
-                ? await _scanner.ScanCategoryAfterArchiveChangeAsync(category, cancellationToken).ConfigureAwait(false)
-                : await _scanner.ScanCategoryAsync(category, cancellationToken).ConfigureAwait(false);
+            // Watching analyzes only images that arrived while it was running. A full sweep
+            // happens on demand from Scan now, or here when a watcher error lost events.
+            CategoryScanResult result;
+            if (fullScanRequested)
+            {
+                result = await _scanner.ScanCategoryAsync(category, cancellationToken).ConfigureAwait(false);
+            }
+            else if (sourcePaths.Length > 0)
+            {
+                result = await _scanner.ScanIncomingPathsAsync(category, sourcePaths, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                // Archive-only change: keep the fingerprint index current without
+                // re-analyzing anything in the input folders.
+                var index = await _indexer.RefreshAsync(category, cancellationToken).ConfigureAwait(false);
+                result = new CategoryScanResult(category, 0, 0, 0, 0, index.Errors);
+            }
+
             ScanCompleted?.Invoke(this, result);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -379,6 +419,11 @@ public sealed class WatchService : IDisposable
     private sealed class PendingCategory(bool archiveChanged)
     {
         public bool ArchiveChanged { get; set; } = archiveChanged;
+
+        public bool FullScanRequested { get; set; }
+
+        /// <summary>Source files the watcher reported since the last debounce window.</summary>
+        public HashSet<string> SourcePaths { get; } = new(StringComparer.OrdinalIgnoreCase);
 
         public System.Threading.Timer Timer { get; set; } = null!;
     }
