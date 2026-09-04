@@ -541,17 +541,9 @@ public partial class MainWindow : Window
                     return false;
                 }
 
-                if (MessageBox.Show(
-                        this,
-                        "Recycle the incoming image and keep this archived match?",
-                        "Keep match",
-                        MessageBoxButton.OKCancel,
-                        MessageBoxImage.Warning) != MessageBoxResult.OK)
-                {
-                    SetStatus("Keep match canceled.");
-                    return false;
-                }
-
+                // No confirmation: the incoming image goes to the Recycle Bin, the archived copy
+                // is verified unchanged first, and the operation is journaled, so this is
+                // reversible without a prompt.
                 await _runtime.Router.KeepMatchAsync(review, candidate);
                 return true;
             });
