@@ -189,7 +189,7 @@
                 <ListView x:Name="HistoryList" Grid.Row="1" automation:AutomationProperties.Name="Activity history">
                     <ListView.View>
                         <GridView>
-                            <GridViewColumn Header="Time" Width="160" DisplayMemberBinding="{Binding OccurredUtc}" />
+                            <GridViewColumn Header="Time" Width="160" DisplayMemberBinding="{Binding OccurredUtc.LocalDateTime, StringFormat=yyyy-MM-dd HH:mm:ss}" />
                             <GridViewColumn Header="Category" Width="100" DisplayMemberBinding="{Binding Category}" />
                             <GridViewColumn Header="Type" Width="150" DisplayMemberBinding="{Binding Kind}" />
                             <GridViewColumn Header="Message" Width="560" DisplayMemberBinding="{Binding Message}" />
@@ -264,13 +264,28 @@
                         </ComboBox>
                     </Grid>
 
+                    <Grid Margin="0,0,0,14">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="210" /><ColumnDefinition Width="300" /></Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock FontWeight="SemiBold" Text="While watching" />
+                            <TextBlock FontSize="12" Foreground="{StaticResource MutedTextBrush}" Text="OnDetection analyzes each image as it arrives. OnInterval ignores individual arrivals and sweeps on a timer." />
+                        </StackPanel>
+                        <ComboBox x:Name="WatchModeCombo" Grid.Column="1" VerticalAlignment="Top" SelectionChanged="SettingsSelectionChanged" automation:AutomationProperties.Name="When watching analyzes images">
+                            <ComboBox.Resources>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Foreground" Value="#111216" />
+                                </Style>
+                            </ComboBox.Resources>
+                        </ComboBox>
+                    </Grid>
+
                     <Grid Margin="0,0,0,20">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="210" /><ColumnDefinition Width="300" /></Grid.ColumnDefinitions>
                         <StackPanel>
-                            <TextBlock FontWeight="SemiBold" Text="Watch sweep interval" />
-                            <TextBlock FontSize="12" Foreground="{StaticResource MutedTextBrush}" Text="Seconds between full sweeps while watching." />
+                            <TextBlock FontWeight="SemiBold" Text="Sweep interval" />
+                            <TextBlock FontSize="12" Foreground="{StaticResource MutedTextBrush}" Text="Seconds between sweeps. Used only by OnInterval." />
                         </StackPanel>
-                        <TextBox x:Name="WatchScanSeconds" Grid.Column="1" VerticalAlignment="Top" LostFocus="SettingsFieldCommitted" KeyDown="SettingsFieldKeyDown" automation:AutomationProperties.Name="Seconds between full sweeps while watching" />
+                        <TextBox x:Name="WatchScanSeconds" Grid.Column="1" VerticalAlignment="Top" LostFocus="SettingsFieldCommitted" KeyDown="SettingsFieldKeyDown" automation:AutomationProperties.Name="Seconds between sweeps while watching" />
                     </Grid>
 
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,20">

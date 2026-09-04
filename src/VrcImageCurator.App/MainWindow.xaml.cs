@@ -29,6 +29,7 @@ public partial class MainWindow : Window
         _runtime = runtime ?? throw new ArgumentNullException(nameof(runtime));
         InitializeComponent();
         SimilarityCombo.ItemsSource = Enum.GetValues<SimilarityProfile>();
+        WatchModeCombo.ItemsSource = Enum.GetValues<WatchMode>();
     }
 
     private ReviewItem? SelectedReview => QueueList.SelectedItem as ReviewItem;
@@ -135,6 +136,7 @@ public partial class MainWindow : Window
             StartWithWindowsCheck.IsChecked = settings.Automation.StartWithWindows;
             StartWithWindowsCheck.IsEnabled = _runtime.AllowStartupRegistration;
             BringReviewForwardCheck.IsChecked = settings.BringReviewForwardWhenHeld;
+            WatchModeCombo.SelectedItem = settings.Automation.WatchMode;
             WatchScanSeconds.Text = settings.Automation.WatchScanSeconds.ToString(
                 System.Globalization.CultureInfo.CurrentCulture);
             UpdateStartupStatusText();
@@ -241,9 +243,12 @@ public partial class MainWindow : Window
             return;
         }
 
+        // Grouped rather than ToDictionary: a duplicate id would otherwise throw from a
+        // selection-changed handler and take the whole page down.
         var indexed = state.ArchiveIndex.Categories
             .SelectMany(category => category.Images)
-            .ToDictionary(image => image.Id);
+            .GroupBy(image => image.Id)
+            .ToDictionary(group => group.Key, group => group.First());
         CandidateList.ItemsSource = review.Candidates.Select(candidate =>
         {
             indexed.TryGetValue(candidate.IndexedImageId, out var record);
@@ -473,7 +478,7 @@ public partial class MainWindow : Window
             "Keeping incoming image...",
             async () =>
             {
-                if (!await ValidateReviewAsync(review))
+                if (!await ValidateReviewAsync(review, candidate))
                 {
                     return;
                 }
@@ -525,7 +530,7 @@ public partial class MainWindow : Window
         await RunReviewActionAsync(
             async () =>
             {
-                if (!await ValidateReviewAsync(review))
+                if (!await ValidateReviewAsync(review, candidate))
                 {
                     return false;
                 }
@@ -578,6 +583,12 @@ public partial class MainWindow : Window
 
     private async void ClearReviewQueue(object sender, RoutedEventArgs e)
     {
+        if (_busy)
+        {
+            SetStatus("Another operation is still running. Wait for it to finish, then try again.");
+            return;
+        }
+
         var state = await _runtime.StateStore.LoadAsync();
         var reviews = state.ReviewQueue
             .Where(review => review.Status != ReviewStatus.Resolved)
@@ -623,6 +634,12 @@ public partial class MainWindow : Window
 
     private async void RemoveSelectedReview(object sender, RoutedEventArgs e)
     {
+        if (_busy)
+        {
+            SetStatus("Another operation is still running. Wait for it to finish, then try again.");
+            return;
+        }
+
         var review = SelectedReview;
         if (review is null)
         {
@@ -662,7 +679,12 @@ public partial class MainWindow : Window
             });
     }
 
-    private async Task<bool> ValidateReviewAsync(ReviewItem review)
+    /// <param name="candidate">
+    /// The candidate this action will touch, or null when the action does not involve one.
+    /// Only that candidate is re-decoded: checking every candidate meant decoding all of them on
+    /// every button press, and FileRouter verifies again immediately before it touches a file.
+    /// </param>
+    private async Task<bool> ValidateReviewAsync(ReviewItem review, ReviewCandidate? candidate = null)
     {
         if (!File.Exists(review.HeldFilePath))
         {
@@ -675,26 +697,28 @@ public partial class MainWindow : Window
             return await ReconcileReviewAsync(review);
         }
 
-        var staleIds = new List<Guid>();
-        foreach (var candidate in review.Candidates)
-        {
-            var decoded = await _runtime.Decoder.DecodeAsync(candidate.ArchivePath);
-            if (!decoded.IsSuccess
-                || ImageFingerprint.Create(decoded.Image!).ExactIdentity != candidate.ExpectedFingerprint)
-            {
-                staleIds.Add(candidate.Id);
-            }
-        }
-
-        if (staleIds.Count == 0)
+        if (candidate is null)
         {
             return true;
         }
 
+        var decoded = await _runtime.Decoder.DecodeAsync(candidate.ArchivePath);
+        if (decoded.IsSuccess
+            && ImageFingerprint.Create(decoded.Image!).ExactIdentity == candidate.ExpectedFingerprint)
+        {
+            return true;
+        }
+
+        var staleIds = new List<Guid> { candidate.Id };
         await _runtime.StateStore.UpdateAsync(
             state =>
             {
-                var current = state.ReviewQueue.Single(item => item.Id == review.Id);
+                var current = state.ReviewQueue.SingleOrDefault(item => item.Id == review.Id);
+                if (current is null)
+                {
+                    return false;
+                }
+
                 current.Candidates.RemoveAll(item => staleIds.Contains(item.Id));
                 current.Status = ReviewStatus.Pending;
                 state.History.Add(new ActivityEntry
@@ -711,7 +735,7 @@ public partial class MainWindow : Window
                 return true;
             });
         await RefreshAsync(review.Id);
-        MessageBox.Show(this, "One or more archive candidates changed or disappeared. Their stale references were removed safely; review the remaining matches before choosing a terminal action.", "Review reconciled", MessageBoxButton.OK, MessageBoxImage.Warning);
+        MessageBox.Show(this, "That archive match changed or disappeared, so its stale reference was removed. Review the remaining matches before choosing a terminal action.", "Review reconciled", MessageBoxButton.OK, MessageBoxImage.Warning);
         return false;
     }
 
@@ -869,9 +893,11 @@ public partial class MainWindow : Window
                 return true;
             });
 
-        if (startupChanged)
+        // A running watcher holds the folders, mode and interval it was started with, so it has
+        // to be restarted for any settings change to take effect.
+        if (startupChanged || _runtime.Watcher.IsRunning)
         {
-            await _runtime.ApplyAutomationSettingsAsync(updateStartupRegistration: true);
+            await _runtime.ApplyAutomationSettingsAsync(updateStartupRegistration: startupChanged);
         }
 
         UpdateResolvedDestinations(draft.OutputRootPath);
@@ -928,7 +954,8 @@ public partial class MainWindow : Window
             (SimilarityProfile?)SimilarityCombo.SelectedItem ?? SimilarityProfile.Conservative,
             StartWithWindowsCheck.IsChecked == true,
             BringReviewForwardCheck.IsChecked == true,
-            ParseWatchScanSeconds(WatchScanSeconds.Text));
+            ParseWatchScanSeconds(WatchScanSeconds.Text),
+            (WatchMode?)WatchModeCombo.SelectedItem ?? WatchMode.OnDetection);
     }
 
     private static int ParseWatchScanSeconds(string? text) =>
@@ -1195,6 +1222,9 @@ public partial class MainWindow : Window
         StopButton.IsEnabled = false;
         SetStatus("Stopping after the current image...");
         _operationCancellation.Cancel();
+
+        // A scan started by folder watching runs on its own token, so cancel that too.
+        _runtime.Watcher.CancelActiveScan();
     }
 
     public void ReportWatchDetection(VrcImageCategory category, string fileName) =>

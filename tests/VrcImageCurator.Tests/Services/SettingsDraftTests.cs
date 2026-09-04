@@ -172,4 +172,37 @@ public sealed class SettingsDraftTests
         Assert.Null(draft.DescribeBlockingProblem(state.Settings));
         Assert.Null(draft.DescribeMissingFolders());
     }
+
+    [Fact]
+    public void WatchModeAndIntervalArePersistedAndClamped()
+    {
+        using var directory = new TestDirectory();
+        var state = AppStateDefaults.Create(directory.GetPath("profile"), directory.GetPath("local"));
+        var draft = new SettingsDraft(
+            state.Settings.CategoryMappings
+                .Select(mapping => new CategorySettingsDraft(mapping.Category, mapping.SourcePath, false))
+                .ToArray(),
+            state.Settings.OutputRootPath,
+            SimilarityProfile.Conservative,
+            StartWithWindows: false,
+            BringReviewForwardWhenHeld: true,
+            WatchScanSeconds: 5,
+            WatchMode: WatchMode.OnInterval);
+
+        draft.ApplyTo(state);
+
+        Assert.Equal(WatchMode.OnInterval, state.Settings.Automation.WatchMode);
+        Assert.Equal(
+            AutomationSettings.MinimumWatchScanSeconds,
+            state.Settings.Automation.WatchScanSeconds);
+    }
+
+    [Fact]
+    public void WatchModeDefaultsToAnalyzingOnDetection()
+    {
+        using var directory = new TestDirectory();
+        var state = AppStateDefaults.Create(directory.GetPath("profile"), directory.GetPath("local"));
+
+        Assert.Equal(WatchMode.OnDetection, state.Settings.Automation.WatchMode);
+    }
 }

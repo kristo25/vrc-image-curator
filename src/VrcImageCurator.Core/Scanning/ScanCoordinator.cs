@@ -462,10 +462,16 @@ public sealed class ScanCoordinator
                             outcome = "Exact duplicate recycled";
                             continue;
                         }
-                        catch (NotSupportedException)
+                        catch (Exception exception) when (
+                            exception is NotSupportedException
+                                or InvalidOperationException
+                                or IOException
+                                or UnauthorizedAccessException)
                         {
-                            // The Recycle Bin is unavailable for this path. Never delete
-                            // permanently: fall through and let the user decide.
+                            // The Recycle Bin was unavailable, or the archived copy changed
+                            // between indexing and now. Never delete and never drop the image:
+                            // fall through and let the user decide.
+                            errors.Add($"{path}: could not resolve automatically ({exception.Message}).");
                         }
                     }
 
@@ -713,7 +719,14 @@ public sealed class ScanCoordinator
                 return null;
             }
 
-            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None);
+            // Share everything: VRCX may be writing into this folder right now and must never
+            // be blocked by this check. Whether a file has settled is decided by comparing two
+            // observations, not by holding a lock.
+            using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
             return new FileObservation(stream.Length, file.LastWriteTimeUtc);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)

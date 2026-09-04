@@ -18,6 +18,8 @@ public sealed class WatchService : IDisposable
     private System.Threading.Timer? _retryTimer;
     private System.Threading.Timer? _sweepTimer;
     private CancellationTokenSource _runCancellation = new();
+    private CancellationTokenSource? _activeScanCancellation;
+    private bool _analyzeOnDetection = true;
     private bool _isRunning;
     private bool _disposed;
 
@@ -51,10 +53,24 @@ public sealed class WatchService : IDisposable
         }
     }
 
+    /// <summary>Cancels the scan the watcher is running right now, if any. Watching continues.</summary>
+    public void CancelActiveScan()
+    {
+        lock (_sync)
+        {
+            _activeScanCancellation?.Cancel();
+        }
+    }
+
+    /// <param name="analyzeOnDetection">
+    /// When true, each reported arrival is analyzed immediately. When false, arrivals are only
+    /// announced and nothing is analyzed until <paramref name="sweepInterval"/> elapses.
+    /// </param>
     public void Start(
         IEnumerable<CategoryMapping> mappings,
         IEnumerable<LegacyArchiveMapping>? legacyArchives = null,
-        TimeSpan? sweepInterval = null)
+        TimeSpan? sweepInterval = null,
+        bool analyzeOnDetection = true)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         var replacements = new List<FileSystemWatcher>();
@@ -101,6 +117,7 @@ public sealed class WatchService : IDisposable
                 _targets.AddRange(retainedArchives
                     .Select(item => new WatchTarget(item.ArchivePath, item.Category, true)));
                 _isRunning = enabledMappings.Length > 0;
+                _analyzeOnDetection = analyzeOnDetection;
                 foreach (var watcher in _watchers)
                 {
                     watcher.EnableRaisingEvents = true;
@@ -154,6 +171,7 @@ public sealed class WatchService : IDisposable
             }
 
             _pending.Clear();
+            _activeScanCancellation?.Cancel();
             _retryTimer?.Dispose();
             _retryTimer = null;
             _sweepTimer?.Dispose();
@@ -386,7 +404,8 @@ public sealed class WatchService : IDisposable
     private async Task ProcessAsync(VrcImageCategory category)
     {
         bool fullScanRequested;
-        string[] sourcePaths;
+        string[] scanSourcePaths;
+        CancellationTokenSource scanCancellation;
         CancellationToken cancellationToken;
         lock (_sync)
         {
@@ -397,8 +416,19 @@ public sealed class WatchService : IDisposable
 
             pending.Timer.Dispose();
             fullScanRequested = pending.FullScanRequested;
-            sourcePaths = [.. pending.SourcePaths];
-            cancellationToken = _runCancellation.Token;
+
+            // In OnInterval mode an arrival is announced but not analyzed; the sweep picks it up.
+            scanSourcePaths = _analyzeOnDetection ? [.. pending.SourcePaths] : [];
+            if (!fullScanRequested && scanSourcePaths.Length == 0 && !pending.ArchiveChanged)
+            {
+                return;
+            }
+
+            // Linked so Stop cancels this scan while watching itself keeps running. Not disposed
+            // here if it belongs to another in-flight category; each run disposes its own.
+            scanCancellation = CancellationTokenSource.CreateLinkedTokenSource(_runCancellation.Token);
+            _activeScanCancellation = scanCancellation;
+            cancellationToken = scanCancellation.Token;
         }
 
         var enteredScanGate = false;
@@ -413,9 +443,9 @@ public sealed class WatchService : IDisposable
             {
                 result = await _scanner.ScanCategoryAsync(category, cancellationToken).ConfigureAwait(false);
             }
-            else if (sourcePaths.Length > 0)
+            else if (scanSourcePaths.Length > 0)
             {
-                result = await _scanner.ScanIncomingPathsAsync(category, sourcePaths, cancellationToken)
+                result = await _scanner.ScanIncomingPathsAsync(category, scanSourcePaths, cancellationToken)
                     .ConfigureAwait(false);
             }
             else
@@ -428,8 +458,9 @@ public sealed class WatchService : IDisposable
 
             ScanCompleted?.Invoke(this, result);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
+            // Either watching stopped or the user pressed Stop. Both are clean exits.
         }
         catch (Exception exception)
         {
@@ -462,6 +493,16 @@ public sealed class WatchService : IDisposable
             {
                 _scanGate.Release();
             }
+
+            lock (_sync)
+            {
+                if (ReferenceEquals(_activeScanCancellation, scanCancellation))
+                {
+                    _activeScanCancellation = null;
+                }
+            }
+
+            scanCancellation.Dispose();
         }
     }
 

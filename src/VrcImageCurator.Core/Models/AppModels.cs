@@ -32,6 +32,19 @@ public enum IndexStatus
     Unavailable,
 }
 
+/// <summary>How folder watching decides when to analyze incoming images.</summary>
+public enum WatchMode
+{
+    /// <summary>Analyze each image as soon as the watcher reports it, and nothing else.</summary>
+    OnDetection,
+
+    /// <summary>
+    /// Ignore individual file events and sweep the configured folders on a fixed interval.
+    /// Arrivals are still announced, but nothing is analyzed until the next sweep.
+    /// </summary>
+    OnInterval,
+}
+
 public enum ReviewStatus
 {
     Pending,
@@ -154,9 +167,13 @@ public sealed class AutomationSettings
 
     public bool StartWithWindows { get; set; }
 
+    /// <summary>Whether watching reacts to each arrival or sweeps on a timer.</summary>
+    public WatchMode WatchMode { get; set; } = WatchMode.OnDetection;
+
     /// <summary>
-    /// How often folder watching runs a full sweep as a safety net for filesystem events the
-    /// watcher may have missed. Clamped to <see cref="MinimumWatchScanSeconds"/>..<see cref="MaximumWatchScanSeconds"/>.
+    /// How often folder watching sweeps the configured folders when <see cref="WatchMode"/> is
+    /// <see cref="WatchMode.OnInterval"/>. Clamped to
+    /// <see cref="MinimumWatchScanSeconds"/>..<see cref="MaximumWatchScanSeconds"/>.
     /// </summary>
     public int WatchScanSeconds { get; set; } = DefaultWatchScanSeconds;
 

@@ -127,7 +127,8 @@ Path-boundary and reparse-point checks guard file operations. Moves and recycle 
 - Configurable source paths and one main archive root.
 - Recursive one-time scan of another folder with category selection.
 - Start/stop watching while the app is open.
-- Settings save automatically on field commit; only overlap violations block a save.
+- Settings save automatically on field commit; only overlap violations block a save. A running watcher is restarted so folder, mode and interval changes take effect immediately.
+- Watching has two modes: `OnDetection` analyzes each reported arrival, `OnInterval` sweeps every `WatchScanSeconds`. Exact (100%, same resolution) matches recycle the incoming copy without review.
 - Optional per-user `Start with Windows` registration.
 - Multiple visual themes.
 - Incoming and candidate previews, including animated GIF handling.

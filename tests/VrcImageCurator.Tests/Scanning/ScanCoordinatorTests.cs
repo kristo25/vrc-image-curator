@@ -840,4 +840,73 @@ public sealed class ScanCoordinatorTests
         Assert.Equal(1, result.Skipped);
         Assert.True(File.Exists(video));
     }
+
+    [Fact]
+    public async Task ExactMatchFallsBackToReviewWhenTheRecycleFails()
+    {
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        using var image = ImageFixtureFactory.CreatePattern(23);
+        var incoming = Path.Combine(sourceRoot, "copy.png");
+        var archived = Path.Combine(archiveRoot, "original.png");
+        await image.SaveAsPngAsync(incoming);
+        await image.SaveAsPngAsync(archived);
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var decoder = new ImageDecoder();
+        var recycleBin = new FileRouterTests.FakeRecycleBinService(throwOnRecycle: true);
+        var coordinator = new ScanCoordinator(
+            store,
+            new ArchiveIndexer(store, decoder),
+            decoder,
+            new FileRouter(store, decoder, recycleBin),
+            TimeSpan.Zero);
+
+        var result = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+
+        // The automatic path failed, so the image must still reach the user rather than vanish
+        // or be silently dropped.
+        Assert.Equal(0, result.AutoKeptArchived);
+        Assert.Equal(1, result.HeldForReview);
+        Assert.NotEmpty(result.Errors);
+        Assert.True(File.Exists(incoming));
+        Assert.True(File.Exists(archived));
+        Assert.Single((await store.LoadAsync()).ReviewQueue);
+    }
+
+    [Fact]
+    public async Task SettleCheckDoesNotBlockAnotherWriterHoldingTheFile()
+    {
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        using var image = ImageFixtureFactory.CreatePattern(24);
+        var incoming = Path.Combine(sourceRoot, "held-open.png");
+        await image.SaveAsPngAsync(incoming);
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var decoder = new ImageDecoder();
+        var coordinator = new ScanCoordinator(
+            store,
+            new ArchiveIndexer(store, decoder),
+            decoder,
+            new FileRouter(store, decoder, new FileRouterTests.FakeRecycleBinService()),
+            TimeSpan.Zero);
+
+        // Stand in for VRCX still holding the file it just wrote, sharing read access.
+        await using (new FileStream(
+            incoming,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete))
+        {
+            var result = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+
+            Assert.Equal(1, result.Examined);
+            Assert.Empty(result.Errors);
+        }
+    }
 }

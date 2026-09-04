@@ -72,7 +72,8 @@ public sealed class AppRuntime : IDisposable
             Watcher.Start(
                 state.Settings.CategoryMappings,
                 state.Settings.LegacyArchiveMappings,
-                state.Settings.Automation.WatchScanInterval);
+                SweepInterval(state.Settings.Automation),
+                state.Settings.Automation.WatchMode == WatchMode.OnDetection);
         }
 
         if (updateStartupRegistration && AllowStartupRegistration)
@@ -89,10 +90,14 @@ public sealed class AppRuntime : IDisposable
         Watcher.Start(
             state.Settings.CategoryMappings,
             state.Settings.LegacyArchiveMappings,
-            state.Settings.Automation.WatchScanInterval);
+            SweepInterval(state.Settings.Automation),
+            state.Settings.Automation.WatchMode == WatchMode.OnDetection);
     }
 
     public Task StopWatchingAsync() => Watcher.StopAsync();
+
+    private static TimeSpan? SweepInterval(AutomationSettings automation) =>
+        automation.WatchMode == WatchMode.OnInterval ? automation.WatchScanInterval : null;
 
     public void Dispose()
     {

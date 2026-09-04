@@ -30,7 +30,7 @@ PNG, animated GIF, JPG/JPEG, WebP, and BMP are supported. MP4, `.temp`, and unsu
 4. Choose one main output folder. The default is `Archived Images` inside your `Pictures\VRChat` folder.
 5. Settings save automatically as you change them. Select **Scan now** when you are ready; the output folder is created if it does not exist yet.
 6. Use **Scan another folder** for a one-time recursive scan outside the configured VRCX folders.
-7. Use **Start watching** when you want the app to monitor configured folders during the current session. Temporarily unavailable folders are attached automatically when they return.
+7. Use **Start watching** when you want the app to monitor configured folders during the current session. Choose **OnDetection** to analyze each image as it arrives, or **OnInterval** to sweep the folders every few seconds instead. Temporarily unavailable folders are attached automatically when they return.
 8. Review matches with **Keep incoming**, **Keep match**, or **Move as Unique**.
 
 Suggested VRCX source root:
