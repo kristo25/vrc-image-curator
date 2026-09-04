@@ -350,14 +350,31 @@ public static class AppStateDefaults
     public static AppStateDocument Create(
         string? userProfilePath = null,
         string? localAppDataPath = null,
-        string? stateDirectoryPath = null)
+        string? stateDirectoryPath = null,
+        string? picturesPath = null)
     {
+        var profileWasProvided = userProfilePath is not null;
         userProfilePath ??= Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         localAppDataPath ??= Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
 
-        // Local (non-OneDrive) VRChat image root. The archive lives beside the category
-        // folders rather than inside any of them, so no source ever contains the archive.
-        var sourceRoot = Path.Combine(userProfilePath, "Images", "VRChat");
+        // Pictures is commonly redirected away from the profile folder by OneDrive Known Folder
+        // Move, so ask Windows where it actually is. Tests and isolated runs pass their own
+        // profile path and stay contained inside it.
+        if (string.IsNullOrWhiteSpace(picturesPath))
+        {
+            picturesPath = profileWasProvided
+                ? Path.Combine(userProfilePath, "Pictures")
+                : Environment.GetFolderPath(Environment.SpecialFolder.MyPictures);
+        }
+
+        if (string.IsNullOrWhiteSpace(picturesPath))
+        {
+            picturesPath = Path.Combine(userProfilePath, "Pictures");
+        }
+
+        // The archive lives beside the category folders rather than inside any of them, so no
+        // source folder ever contains the archive.
+        var sourceRoot = Path.Combine(picturesPath, "VRChat");
         var archiveRoot = Path.Combine(sourceRoot, "Archived Images");
 
         return new AppStateDocument

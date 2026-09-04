@@ -430,13 +430,24 @@ public sealed class ScanCoordinator
 
                 if (matches.Count > 0)
                 {
-                    // A 100% match is the same decoded image, so the archived copy wins without
-                    // asking. Everything below 100% is a judgement call and goes to review.
-                    var exact = matches.FirstOrDefault(match => match.MatchKind == MatchKind.Exact);
-                    if (exact is not null)
+                    // A match reported as 100% is the same picture, so the archived copy wins
+                    // without asking. Everything below 100% is a judgement call and goes to
+                    // review, as does a 100% match at a different resolution.
+                    IndexedImageRecord? duplicate = null;
+                    foreach (var match in matches)
                     {
-                        var duplicate = index.Images.Single(
-                            item => item.Id.ToString("N") == exact.CandidateKey);
+                        var indexed = index.Images.Single(
+                            item => item.Id.ToString("N") == match.CandidateKey);
+                        if (indexed.Fingerprint is not null
+                            && ImageMatcher.IsSamePicture(match, fingerprint, indexed.Fingerprint))
+                        {
+                            duplicate = indexed;
+                            break;
+                        }
+                    }
+
+                    if (duplicate is not null)
+                    {
                         try
                         {
                             await _router.AutoKeepArchivedAsync(

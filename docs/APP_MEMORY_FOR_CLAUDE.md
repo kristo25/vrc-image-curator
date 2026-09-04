@@ -26,8 +26,10 @@ The application is public-facing software under the MIT License. It has a black,
 The normal incoming root is:
 
 ```text
-%USERPROFILE%\Images\VRChat
+<Pictures>\VRChat
 ```
+
+`<Pictures>` is resolved through Windows, so a Pictures folder redirected to OneDrive is found correctly.
 
 It contains three fixed categories:
 
@@ -37,7 +39,7 @@ It contains three fixed categories:
 
 The user's archive root is configurable and is deliberately not recorded in this document. Claude must not target, reference, or operate on it.
 
-The archive root is configurable. The default for a new user is `%USERPROFILE%\Images\VRChat\Archived Images`, a sibling of the three category folders. Category and date subfolders are preserved. For example, an incoming file under `Emoji\2025-05` is routed to `<archive>\Emoji\2025-05`.
+The archive root is configurable. The default for a new user is `<Pictures>\VRChat\Archived Images`, a sibling of the three category folders. Category and date subfolders are preserved. For example, an incoming file under `Emoji\2025-05` is routed to `<archive>\Emoji\2025-05`.
 
 The Review page is the first page shown. The user can scan all enabled configured sources, recursively scan another selected folder, or start session-only folder watching. Ordinary app launches do not automatically start watching.
 

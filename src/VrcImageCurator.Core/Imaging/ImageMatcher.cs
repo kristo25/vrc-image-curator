@@ -53,6 +53,39 @@ public static class ImageMatcher
 
     public static MatchingProfileDefinition GetProfile(SimilarityProfile profile) => Profiles[profile];
 
+    /// <summary>
+    /// A similarity score at or above this is the same picture, not merely a close one. It is
+    /// the point at which the reported percentage reads as 100%, so "shown as 100%" and
+    /// "resolved automatically" can never disagree.
+    /// </summary>
+    public const double IdenticalScoreThreshold = 0.995;
+
+    /// <summary>
+    /// True when a ranked match can be resolved without asking the user: byte-identical decoded
+    /// pixels, or a 100% score at the same resolution and frame count. Two pictures at different
+    /// resolutions are never treated as identical, because deciding which one to keep is the
+    /// user's call, not the app's.
+    /// </summary>
+    public static bool IsSamePicture(
+        ImageMatchResult match,
+        ImageFingerprint incoming,
+        ImageFingerprint candidate)
+    {
+        ArgumentNullException.ThrowIfNull(match);
+        ArgumentNullException.ThrowIfNull(incoming);
+        ArgumentNullException.ThrowIfNull(candidate);
+
+        if (match.MatchKind == MatchKind.Exact)
+        {
+            return true;
+        }
+
+        return match.SimilarityScore >= IdenticalScoreThreshold
+            && incoming.Width == candidate.Width
+            && incoming.Height == candidate.Height
+            && incoming.FrameCount == candidate.FrameCount;
+    }
+
     public static ImageSimilarityMeasurement MeasureSimilarity(
         ImageFingerprint first,
         ImageFingerprint second)
@@ -586,17 +619,17 @@ public static class ImageMatcher
     {
         var reasons = new List<string>
         {
-            $"Perceptual structure is {comparison.HashScore:P0} similar.",
-            $"Normalized thumbnail pixels are {comparison.ThumbnailScore:P0} similar.",
-            $"Normalized color layout is {comparison.ColorThumbnailScore:P0} similar.",
-            $"Transparency layout is {comparison.AlphaScore:P0} similar.",
-            $"Localized visual details are {comparison.LocalDetailScore:P0} similar.",
-            $"Color statistics are {comparison.ColorScore:P0} similar.",
-            $"Aspect ratio is {comparison.AspectScore:P0} similar.",
+            $"Perceptual structure is {comparison.HashScore:P1} similar.",
+            $"Normalized thumbnail pixels are {comparison.ThumbnailScore:P1} similar.",
+            $"Normalized color layout is {comparison.ColorThumbnailScore:P1} similar.",
+            $"Transparency layout is {comparison.AlphaScore:P1} similar.",
+            $"Localized visual details are {comparison.LocalDetailScore:P1} similar.",
+            $"Color statistics are {comparison.ColorScore:P1} similar.",
+            $"Aspect ratio is {comparison.AspectScore:P1} similar.",
         };
         if (incoming.FrameCount > 1 || candidate.FrameCount > 1)
         {
-            reasons.Add($"Animation sequence and timing are {comparison.AnimationScore:P0} compatible.");
+            reasons.Add($"Animation sequence and timing are {comparison.AnimationScore:P1} compatible.");
         }
 
         return reasons;

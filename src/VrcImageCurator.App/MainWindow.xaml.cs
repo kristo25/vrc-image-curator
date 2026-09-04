@@ -255,7 +255,7 @@ public partial class MainWindow : Window
                 : string.Empty;
             return new CandidatePreviewItem(
                 candidate,
-                $"{candidate.MatchKind} | {candidate.SimilarityScore:P0} similar",
+                $"{candidate.MatchKind} | {candidate.SimilarityScore:P1} similar",
                 resolution,
                 string.Join("  ", candidate.MatchReasons) + timing,
                 candidate.ArchivePath);

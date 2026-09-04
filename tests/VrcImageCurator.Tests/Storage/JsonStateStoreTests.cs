@@ -68,12 +68,12 @@ public sealed class JsonStateStoreTests
         Assert.Equal(SimilarityProfile.Conservative, state.Settings.SimilarityProfile);
         Assert.Equal(OrganizationPolicy.PreserveIncomingRelativeFolder, state.Settings.OrganizationPolicy);
         Assert.Equal(
-            Path.Combine(profilePath, "Images", "VRChat", "Archived Images"),
+            Path.Combine(profilePath, "Pictures", "VRChat", "Archived Images"),
             state.Settings.OutputRootPath);
         Assert.All(
             state.Settings.CategoryMappings,
             mapping => Assert.Equal(
-                Path.Combine(profilePath, "Images", "VRChat", mapping.Category.ToString()),
+                Path.Combine(profilePath, "Pictures", "VRChat", mapping.Category.ToString()),
                 mapping.SourcePath));
         Assert.True(File.Exists(store.StatePath));
         Assert.All(

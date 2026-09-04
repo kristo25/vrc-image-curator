@@ -481,4 +481,55 @@ public sealed class ImageMatcherTests
             "fixture",
             decodedFrames));
     }
+
+    [Fact]
+    public void SamePictureCoversAnExactMatch()
+    {
+        using var image = ImageFixtureFactory.CreatePattern(310);
+        var fingerprint = ImageFingerprint.Create(ImageFixtureFactory.ToDecodedImage(image));
+        var match = new ImageMatchResult("candidate", MatchKind.Exact, 1, ["Exact"]);
+
+        Assert.True(ImageMatcher.IsSamePicture(match, fingerprint, fingerprint));
+    }
+
+    [Fact]
+    public void SamePictureCoversAHundredPercentScoreAtTheSameResolution()
+    {
+        using var image = ImageFixtureFactory.CreatePattern(311);
+        var fingerprint = ImageFingerprint.Create(ImageFixtureFactory.ToDecodedImage(image));
+        var match = new ImageMatchResult(
+            "candidate",
+            MatchKind.Similar,
+            ImageMatcher.IdenticalScoreThreshold,
+            ["reason"]);
+
+        Assert.True(ImageMatcher.IsSamePicture(match, fingerprint, fingerprint));
+    }
+
+    [Fact]
+    public void SamePictureRejectsAHundredPercentScoreAtADifferentResolution()
+    {
+        using var image = ImageFixtureFactory.CreatePattern(312);
+        using var larger = image.Clone(context => context.Resize(image.Width * 2, image.Height * 2));
+        var incoming = ImageFingerprint.Create(ImageFixtureFactory.ToDecodedImage(larger));
+        var archived = ImageFingerprint.Create(ImageFixtureFactory.ToDecodedImage(image));
+        var match = new ImageMatchResult("candidate", MatchKind.Similar, 1, ["reason"]);
+
+        // Which resolution to keep is the user's decision, so this still goes to review.
+        Assert.False(ImageMatcher.IsSamePicture(match, incoming, archived));
+    }
+
+    [Fact]
+    public void SamePictureRejectsAScoreBelowTheIdenticalThreshold()
+    {
+        using var image = ImageFixtureFactory.CreatePattern(313);
+        var fingerprint = ImageFingerprint.Create(ImageFixtureFactory.ToDecodedImage(image));
+        var match = new ImageMatchResult(
+            "candidate",
+            MatchKind.Similar,
+            ImageMatcher.IdenticalScoreThreshold - 0.001,
+            ["reason"]);
+
+        Assert.False(ImageMatcher.IsSamePicture(match, fingerprint, fingerprint));
+    }
 }
