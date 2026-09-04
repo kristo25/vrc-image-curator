@@ -40,7 +40,8 @@
                     <TextBlock x:Name="QueueCountText" Margin="0,0,12,0" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
                     <Button x:Name="ScanAnotherButton" Content="Scan another folder" Margin="0,0,8,0" Click="ScanAnotherFolder" automation:AutomationProperties.Name="Select and scan another image folder" />
                     <Button x:Name="WatchButton" Content="Start watching" Margin="0,0,8,0" Click="ToggleWatching" automation:AutomationProperties.Name="Start watching configured image folders" />
-                    <Button x:Name="ScanButton" Style="{StaticResource PrimaryButton}" Content="Scan now" Click="ScanNow" automation:AutomationProperties.Name="Scan enabled image folders now" />
+                    <Button x:Name="ScanButton" Style="{StaticResource PrimaryButton}" Content="Scan now" Margin="0,0,8,0" Click="ScanNow" automation:AutomationProperties.Name="Scan enabled image folders now" />
+                    <Button x:Name="StopButton" Style="{StaticResource DangerButton}" Content="Stop" IsEnabled="False" Click="StopCurrentOperation" automation:AutomationProperties.Name="Stop the running scan" />
                 </WrapPanel>
             </Grid>
         </Border>
@@ -263,6 +264,15 @@
                         </ComboBox>
                     </Grid>
 
+                    <Grid Margin="0,0,0,20">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="210" /><ColumnDefinition Width="300" /></Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock FontWeight="SemiBold" Text="Watch sweep interval" />
+                            <TextBlock FontSize="12" Foreground="{StaticResource MutedTextBrush}" Text="Seconds between full sweeps while watching." />
+                        </StackPanel>
+                        <TextBox x:Name="WatchScanSeconds" Grid.Column="1" VerticalAlignment="Top" LostFocus="SettingsFieldCommitted" KeyDown="SettingsFieldKeyDown" automation:AutomationProperties.Name="Seconds between full sweeps while watching" />
+                    </Grid>
+
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,20">
                         <CheckBox x:Name="StartWithWindowsCheck" Margin="0,0,28,0" Content="Start with Windows" Checked="SettingsToggled" Unchecked="SettingsToggled" />
                         <CheckBox x:Name="BringReviewForwardCheck" Content="Bring Review forward when a match is queued" Checked="SettingsToggled" Unchecked="SettingsToggled" />
@@ -306,14 +316,16 @@
                 <TextBlock x:Name="StatusText" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" Text="Ready" TextTrimming="CharacterEllipsis" automation:AutomationProperties.LiveSetting="Polite" />
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0,0,0">
                     <StackPanel x:Name="ScanProgressPanel" Orientation="Horizontal" Visibility="Collapsed" VerticalAlignment="Center">
-                        <TextBlock x:Name="ScanProgressLabel" Margin="0,0,8,0" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" Text="Reading" />
+                        <TextBlock x:Name="ScanProgressLabel" Width="92" Margin="0,0,8,0" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" Text="Reading" />
                         <ProgressBar x:Name="ScanProgressBar" Width="150" Height="10" Minimum="0" Maximum="1" automation:AutomationProperties.Name="Image reading progress" />
                         <TextBlock x:Name="ScanProgressText" Width="76" Margin="8,0,0,0" VerticalAlignment="Center" TextAlignment="Right" Foreground="{StaticResource MutedTextBrush}" />
+                        <TextBlock x:Name="ScanFileText" Width="170" Margin="8,0,0,0" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" automation:AutomationProperties.Name="File being read" />
                     </StackPanel>
                     <StackPanel x:Name="ProcessingProgressPanel" Orientation="Horizontal" Visibility="Collapsed" VerticalAlignment="Center" Margin="16,0,0,0">
                         <TextBlock Margin="0,0,8,0" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" Text="Results" />
                         <ProgressBar x:Name="ProcessingProgressBar" Width="150" Height="10" Minimum="0" Maximum="1" automation:AutomationProperties.Name="Scan results processing progress" />
                         <TextBlock x:Name="ProcessingProgressText" Width="76" Margin="8,0,0,0" VerticalAlignment="Center" TextAlignment="Right" Foreground="{StaticResource MutedTextBrush}" />
+                        <TextBlock x:Name="ProcessingActivityText" Width="230" Margin="8,0,0,0" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" TextTrimming="CharacterEllipsis" automation:AutomationProperties.Name="Most recent scan outcome" />
                     </StackPanel>
                 </StackPanel>
             </Grid>

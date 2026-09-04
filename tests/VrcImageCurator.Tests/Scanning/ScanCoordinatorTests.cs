@@ -45,7 +45,7 @@ public sealed class ScanCoordinatorTests
     }
 
     [Fact]
-    public async Task ExactMatchStaysInIncomingFolderAndPersistsEveryCandidate()
+    public async Task ExactMatchRecyclesTheIncomingCopyAndKeepsTheArchivedOne()
     {
         using var directory = new TestDirectory();
         var sourceRoot = directory.GetPath("incoming");
@@ -60,25 +60,58 @@ public sealed class ScanCoordinatorTests
         await File.WriteAllTextAsync(Path.Combine(sourceRoot, "ignored.temp"), "not an image");
         using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
         var decoder = new ImageDecoder();
-        var router = new FileRouter(store, decoder, new FileRouterTests.FakeRecycleBinService());
+        var recycleBin = new FileRouterTests.FakeRecycleBinService();
         var coordinator = new ScanCoordinator(
             store,
             new ArchiveIndexer(store, decoder),
             decoder,
-            router,
+            new FileRouter(store, decoder, recycleBin),
             TimeSpan.Zero);
 
         var result = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
 
         Assert.Equal(1, result.Examined);
-        Assert.Equal(1, result.HeldForReview);
-        Assert.True(File.Exists(incoming));
+        Assert.Equal(1, result.AutoKeptArchived);
+        Assert.Equal(0, result.HeldForReview);
+        Assert.Equal(incoming, Assert.Single(recycleBin.RecycledPaths));
+        Assert.True(File.Exists(archived));
         Assert.True(File.Exists(Path.Combine(sourceRoot, "ignored.temp")));
+        Assert.Empty((await store.LoadAsync()).ReviewQueue);
+    }
+
+    [Fact]
+    public async Task ExactMatchIsQueuedForReviewWhenTheRecycleBinIsUnavailable()
+    {
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        using var image = ImageFixtureFactory.CreatePattern(22);
+        var incoming = Path.Combine(sourceRoot, "copy.png");
+        var archived = Path.Combine(archiveRoot, "original.png");
+        await image.SaveAsPngAsync(incoming);
+        await image.SaveAsPngAsync(archived);
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var decoder = new ImageDecoder();
+        var recycleBin = new FileRouterTests.FakeRecycleBinService(canRecycle: false);
+        var coordinator = new ScanCoordinator(
+            store,
+            new ArchiveIndexer(store, decoder),
+            decoder,
+            new FileRouter(store, decoder, recycleBin),
+            TimeSpan.Zero);
+
+        var result = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+
+        // Never delete permanently: without a Recycle Bin the decision goes back to the user.
+        Assert.Equal(0, result.AutoKeptArchived);
+        Assert.Equal(1, result.HeldForReview);
+        Assert.Empty(recycleBin.RecycledPaths);
+        Assert.True(File.Exists(incoming));
+        Assert.True(File.Exists(archived));
         var review = Assert.Single((await store.LoadAsync()).ReviewQueue);
-        Assert.Equal(incoming, review.HeldFilePath);
-        Assert.True(review.IsIncomingInPlace);
-        Assert.Equal(archived, Assert.Single(review.Candidates).ArchivePath);
-        Assert.Equal(MatchKind.Exact, review.Candidates[0].MatchKind);
+        Assert.Equal(MatchKind.Exact, Assert.Single(review.Candidates).MatchKind);
     }
 
     [Fact]
@@ -138,12 +171,14 @@ public sealed class ScanCoordinatorTests
 
         var result = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
 
+        // The externally added archive file was picked up by the refresh, so the incoming
+        // exact copy resolved itself.
         Assert.Empty(result.Errors);
         Assert.Equal(0, result.MovedUnique);
-        Assert.Equal(1, result.HeldForReview);
+        Assert.Equal(1, result.AutoKeptArchived);
         Assert.True(File.Exists(archived));
-        Assert.True(File.Exists(incoming));
-        Assert.Equal(archived, Assert.Single(Assert.Single((await store.LoadAsync()).ReviewQueue).Candidates).ArchivePath);
+        Assert.False(File.Exists(incoming));
+        Assert.Empty((await store.LoadAsync()).ReviewQueue);
     }
 
     [Fact]
@@ -275,7 +310,8 @@ public sealed class ScanCoordinatorTests
         Assert.Equal(1, result.MovedUnique);
         Assert.True(File.Exists(Path.Combine(archiveRoot, "manual.png")));
         Assert.Equal(new ScanProgress(VrcImageCategory.Emoji, 0, 1), progress.Values[0]);
-        Assert.Equal(new ScanProgress(VrcImageCategory.Emoji, 1, 1), progress.Values[^1]);
+        Assert.Equal(1, progress.Values[^1].ScannedImages);
+        Assert.Equal(1, progress.Values[^1].TotalImages);
     }
 
     [Fact]
@@ -316,7 +352,8 @@ public sealed class ScanCoordinatorTests
             progress: progress);
 
         Assert.Equal(1, result.Examined);
-        Assert.Equal(new ScanProgress(VrcImageCategory.Emoji, 1, 1), values[^1]);
+        Assert.Equal(1, values[^1].ScannedImages);
+        Assert.Equal(1, values[^1].TotalImages);
         Assert.True(File.Exists(Path.Combine(manualSource, "added-after-count.png")));
     }
 
@@ -389,14 +426,13 @@ public sealed class ScanCoordinatorTests
 
         var result = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
 
+        // The second copy is compared against the first one already archived in this same scan.
         Assert.Equal(1, result.MovedUnique);
-        Assert.Equal(1, result.HeldForReview);
-        var archived = Path.Combine(archiveRoot, "01-first.png");
-        Assert.True(File.Exists(archived));
-        Assert.True(File.Exists(second));
-        var review = Assert.Single((await store.LoadAsync()).ReviewQueue);
-        Assert.Equal(second, review.HeldFilePath);
-        Assert.Equal(archived, Assert.Single(review.Candidates).ArchivePath);
+        Assert.Equal(1, result.AutoKeptArchived);
+        Assert.Equal(0, result.HeldForReview);
+        Assert.True(File.Exists(Path.Combine(archiveRoot, "01-first.png")));
+        Assert.False(File.Exists(second));
+        Assert.Empty((await store.LoadAsync()).ReviewQueue);
     }
 
     [Fact]
@@ -409,9 +445,10 @@ public sealed class ScanCoordinatorTests
         Directory.CreateDirectory(configuredSource);
         Directory.CreateDirectory(manualSource);
         Directory.CreateDirectory(archiveRoot);
-        using var duplicate = ImageFixtureFactory.CreatePattern(96);
+        using var archived = ImageFixtureFactory.CreatePattern(96);
+        using var duplicate = ImageFixtureFactory.CreateNearDuplicate(archived);
         using var unique = ImageFixtureFactory.CreatePattern(97);
-        await duplicate.SaveAsPngAsync(Path.Combine(archiveRoot, "existing.png"));
+        await archived.SaveAsPngAsync(Path.Combine(archiveRoot, "existing.png"));
         await duplicate.SaveAsPngAsync(Path.Combine(manualSource, "duplicate.png"));
         await unique.SaveAsPngAsync(Path.Combine(manualSource, "unique.png"));
         using var store = FileRouterTests.CreateStore(directory, configuredSource, archiveRoot);
@@ -433,7 +470,8 @@ public sealed class ScanCoordinatorTests
         Assert.Equal(1, result.MovedUnique);
         Assert.Equal(1, result.HeldForReview);
         Assert.Equal(new ScanProcessingProgress(0, 2), processingProgress.Values[0]);
-        Assert.Equal(new ScanProcessingProgress(2, 2), processingProgress.Values[^1]);
+        Assert.Equal(2, processingProgress.Values[^1].ProcessedImages);
+        Assert.Equal(2, processingProgress.Values[^1].TotalImages);
         Assert.Equal(3, processingProgress.Values.Count);
     }
 
@@ -445,9 +483,10 @@ public sealed class ScanCoordinatorTests
         var archiveRoot = directory.GetPath("archive", "Emoji");
         Directory.CreateDirectory(sourceRoot);
         Directory.CreateDirectory(archiveRoot);
-        using var duplicate = ImageFixtureFactory.CreatePattern(92);
+        using var archived = ImageFixtureFactory.CreatePattern(92);
+        using var duplicate = ImageFixtureFactory.CreateNearDuplicate(archived);
         using var unique = ImageFixtureFactory.CreatePattern(93);
-        await duplicate.SaveAsPngAsync(Path.Combine(archiveRoot, "existing.png"));
+        await archived.SaveAsPngAsync(Path.Combine(archiveRoot, "existing.png"));
         await duplicate.SaveAsPngAsync(Path.Combine(sourceRoot, "01-duplicate.png"));
         await unique.SaveAsPngAsync(Path.Combine(sourceRoot, "02-unique.png"));
         using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
@@ -489,9 +528,10 @@ public sealed class ScanCoordinatorTests
         Directory.CreateDirectory(printsArchive);
         var duplicatePath = Path.Combine(emojiSource, "duplicate.png");
         var uniquePath = Path.Combine(printsSource, "unique.png");
-        using var duplicate = ImageFixtureFactory.CreatePattern(94);
+        using var archived = ImageFixtureFactory.CreatePattern(94);
+        using var duplicate = ImageFixtureFactory.CreateNearDuplicate(archived);
         using var unique = ImageFixtureFactory.CreatePattern(95);
-        await duplicate.SaveAsPngAsync(Path.Combine(emojiArchive, "existing.png"));
+        await archived.SaveAsPngAsync(Path.Combine(emojiArchive, "existing.png"));
         await duplicate.SaveAsPngAsync(duplicatePath);
         await unique.SaveAsPngAsync(uniquePath);
         using var store = FileRouterTests.CreateStore(directory, emojiSource, emojiArchive);
@@ -525,7 +565,8 @@ public sealed class ScanCoordinatorTests
         Assert.Equal(1, results.Sum(result => result.MovedUnique));
         Assert.Equal(1, results.Sum(result => result.HeldForReview));
         Assert.Equal(new ScanProcessingProgress(0, 2), processingProgress.Values[0]);
-        Assert.Equal(new ScanProcessingProgress(2, 2), processingProgress.Values[^1]);
+        Assert.Equal(2, processingProgress.Values[^1].ProcessedImages);
+        Assert.Equal(2, processingProgress.Values[^1].TotalImages);
         Assert.Equal(3, processingProgress.Values.Count);
         var operations = (await store.LoadAsync()).History
             .Where(entry => entry.OperationId is not null)
@@ -567,7 +608,8 @@ public sealed class ScanCoordinatorTests
             progress: progress);
 
         Assert.NotEmpty(result.Errors);
-        Assert.Equal(new ScanProgress(VrcImageCategory.Emoji, 1, 1), progress.Values[^1]);
+        Assert.Equal(1, progress.Values[^1].ScannedImages);
+        Assert.Equal(1, progress.Values[^1].TotalImages);
     }
 
     [Fact]

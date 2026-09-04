@@ -69,7 +69,10 @@ public sealed class AppRuntime : IDisposable
         if (Watcher.IsRunning)
         {
             await Watcher.StopAsync().ConfigureAwait(false);
-            Watcher.Start(state.Settings.CategoryMappings, state.Settings.LegacyArchiveMappings);
+            Watcher.Start(
+                state.Settings.CategoryMappings,
+                state.Settings.LegacyArchiveMappings,
+                state.Settings.Automation.WatchScanInterval);
         }
 
         if (updateStartupRegistration && AllowStartupRegistration)
@@ -83,7 +86,10 @@ public sealed class AppRuntime : IDisposable
     public async Task StartWatchingAsync()
     {
         var state = await StateStore.LoadAsync().ConfigureAwait(false);
-        Watcher.Start(state.Settings.CategoryMappings, state.Settings.LegacyArchiveMappings);
+        Watcher.Start(
+            state.Settings.CategoryMappings,
+            state.Settings.LegacyArchiveMappings,
+            state.Settings.Automation.WatchScanInterval);
     }
 
     public Task StopWatchingAsync() => Watcher.StopAsync();

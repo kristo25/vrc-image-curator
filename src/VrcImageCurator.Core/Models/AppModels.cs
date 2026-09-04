@@ -74,6 +74,7 @@ public enum JournalOperationPurpose
     MoveUnique,
     MoveDuplicateOverride,
     KeepExisting,
+    AutoKeepArchived,
     DeleteArchiveCandidate,
     PreserveArchiveCandidate,
     RestoreReviewToSource,
@@ -152,6 +153,21 @@ public sealed class AutomationSettings
     public bool WatchWhileOpen { get; set; }
 
     public bool StartWithWindows { get; set; }
+
+    /// <summary>
+    /// How often folder watching runs a full sweep as a safety net for filesystem events the
+    /// watcher may have missed. Clamped to <see cref="MinimumWatchScanSeconds"/>..<see cref="MaximumWatchScanSeconds"/>.
+    /// </summary>
+    public int WatchScanSeconds { get; set; } = DefaultWatchScanSeconds;
+
+    public const int DefaultWatchScanSeconds = 60;
+
+    public const int MinimumWatchScanSeconds = 15;
+
+    public const int MaximumWatchScanSeconds = 3600;
+
+    public TimeSpan WatchScanInterval => TimeSpan.FromSeconds(
+        Math.Clamp(WatchScanSeconds, MinimumWatchScanSeconds, MaximumWatchScanSeconds));
 }
 
 public sealed class ArchiveIndexState

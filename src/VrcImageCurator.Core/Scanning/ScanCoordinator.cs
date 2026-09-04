@@ -11,11 +11,23 @@ public sealed record CategoryScanResult(
     int MovedUnique,
     int HeldForReview,
     int Skipped,
-    IReadOnlyList<string> Errors);
+    IReadOnlyList<string> Errors,
+    int AutoKeptArchived = 0);
 
-public sealed record ScanProgress(VrcImageCategory Category, int ScannedImages, int TotalImages);
+/// <summary><see cref="Activity"/> and <see cref="FileName"/> describe what the scan is doing
+/// right now, so the UI can say more than a bare count.</summary>
+public sealed record ScanProgress(
+    VrcImageCategory Category,
+    int ScannedImages,
+    int TotalImages,
+    string Activity = "",
+    string? FileName = null);
 
-public sealed record ScanProcessingProgress(int ProcessedImages, int TotalImages);
+public sealed record ScanProcessingProgress(
+    int ProcessedImages,
+    int TotalImages,
+    string Activity = "",
+    string? FileName = null);
 
 public sealed class ScanCoordinator
 {
@@ -86,16 +98,21 @@ public sealed class ScanCoordinator
                             mapping.SourcePath,
                             requireEnabled: true,
                             snapshots[mapping.Category],
-                            onImageScanned: () =>
+                            onImageScanned: (activity, file) =>
                             {
                                 scannedImages++;
-                                progress?.Report(new ScanProgress(mapping.Category, scannedImages, totalImages));
+                                progress?.Report(new ScanProgress(
+                                    mapping.Category,
+                                    scannedImages,
+                                    totalImages,
+                                    activity,
+                                    file));
                             },
-                            onImageProcessed: () =>
+                            onImageProcessed: (activity, file) =>
                             {
                                 processedImages++;
                                 processingProgress?.Report(
-                                    new ScanProcessingProgress(processedImages, totalImages));
+                                    new ScanProcessingProgress(processedImages, totalImages, activity, file));
                             },
                             cancellationToken)
                         .ConfigureAwait(false));
@@ -241,16 +258,21 @@ public sealed class ScanCoordinator
                     normalizedSource,
                     requireEnabled: false,
                     snapshot,
-                    onImageScanned: () =>
+                    onImageScanned: (activity, file) =>
                     {
                         scannedImages++;
-                        progress?.Report(new ScanProgress(category, scannedImages, totalImages));
+                        progress?.Report(new ScanProgress(
+                            category,
+                            scannedImages,
+                            totalImages,
+                            activity,
+                            file));
                     },
-                    onImageProcessed: () =>
+                    onImageProcessed: (activity, file) =>
                     {
                         processedImages++;
                         processingProgress?.Report(
-                            new ScanProcessingProgress(processedImages, totalImages));
+                            new ScanProcessingProgress(processedImages, totalImages, activity, file));
                     },
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -266,8 +288,8 @@ public sealed class ScanCoordinator
         string sourceRoot,
         bool requireEnabled,
         SourceSnapshot? sourceSnapshot,
-        Action? onImageScanned,
-        Action? onImageProcessed,
+        Action<string, string?>? onImageScanned,
+        Action<string, string?>? onImageProcessed,
         CancellationToken cancellationToken)
     {
         var initial = await _stateStore.LoadAsync(cancellationToken).ConfigureAwait(false);
@@ -303,7 +325,11 @@ public sealed class ScanCoordinator
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
-            ReportUnprocessed(sourceSnapshot.Paths.Count, onImageScanned, onImageProcessed);
+            ReportUnprocessed(
+                sourceSnapshot.Paths.Count,
+                "Output folder unavailable",
+                onImageScanned,
+                onImageProcessed);
             return new CategoryScanResult(
                 category,
                 0,
@@ -316,7 +342,11 @@ public sealed class ScanCoordinator
         var indexResult = await _indexer.RefreshAsync(category, cancellationToken).ConfigureAwait(false);
         if (indexResult.Status != IndexStatus.Current)
         {
-            ReportUnprocessed(sourceSnapshot.Paths.Count, onImageScanned, onImageProcessed);
+            ReportUnprocessed(
+                sourceSnapshot.Paths.Count,
+                "Archive index unavailable",
+                onImageScanned,
+                onImageProcessed);
             return new CategoryScanResult(category, 0, 0, 0, 0, indexResult.Errors);
         }
 
@@ -327,6 +357,7 @@ public sealed class ScanCoordinator
         var examined = 0;
         var moved = 0;
         var held = 0;
+        var autoKept = 0;
         var skipped = 0;
         var paths = sourceSnapshot.Paths;
         skipped = sourceSnapshot.UnsupportedFiles;
@@ -340,27 +371,32 @@ public sealed class ScanCoordinator
         {
             cancellationToken.ThrowIfCancellationRequested();
             examined++;
+            var fileName = Path.GetFileName(path);
             var readingReported = false;
+            var outcome = "Skipped";
             try
             {
                 if (queuedPaths.Contains(path))
                 {
                     skipped++;
+                    outcome = "Already in the review queue";
                     continue;
                 }
 
                 if (!settledPaths.Contains(path))
                 {
                     errors.Add($"{path}: file is still being written or locked.");
+                    outcome = "Still being written";
                     continue;
                 }
 
                 var decoded = await _decoder.DecodeAsync(path, cancellationToken).ConfigureAwait(false);
-                onImageScanned?.Invoke();
+                onImageScanned?.Invoke("Reading", fileName);
                 readingReported = true;
                 if (!decoded.IsSuccess)
                 {
                     errors.Add($"{path}: {decoded.Failure!.Message}");
+                    outcome = "Could not be read";
                     continue;
                 }
 
@@ -379,6 +415,7 @@ public sealed class ScanCoordinator
                 if (index.Status != IndexStatus.Current)
                 {
                     errors.Add($"{path}: archive index became stale; rescan required.");
+                    outcome = "Archive index went stale";
                     continue;
                 }
 
@@ -393,6 +430,34 @@ public sealed class ScanCoordinator
 
                 if (matches.Count > 0)
                 {
+                    // A 100% match is the same decoded image, so the archived copy wins without
+                    // asking. Everything below 100% is a judgement call and goes to review.
+                    var exact = matches.FirstOrDefault(match => match.MatchKind == MatchKind.Exact);
+                    if (exact is not null)
+                    {
+                        var duplicate = index.Images.Single(
+                            item => item.Id.ToString("N") == exact.CandidateKey);
+                        try
+                        {
+                            await _router.AutoKeepArchivedAsync(
+                                    path,
+                                    category,
+                                    fingerprint,
+                                    duplicate.Path,
+                                    duplicate.ExactFingerprint,
+                                    cancellationToken)
+                                .ConfigureAwait(false);
+                            autoKept++;
+                            outcome = "Exact duplicate recycled";
+                            continue;
+                        }
+                        catch (NotSupportedException)
+                        {
+                            // The Recycle Bin is unavailable for this path. Never delete
+                            // permanently: fall through and let the user decide.
+                        }
+                    }
+
                     var review = new ReviewItem
                     {
                         Id = Guid.NewGuid(),
@@ -426,6 +491,7 @@ public sealed class ScanCoordinator
                     await _router.QueueForReviewAsync(review, cancellationToken).ConfigureAwait(false);
                     queuedPaths.Add(path);
                     held++;
+                    outcome = "Queued for review";
                     continue;
                 }
 
@@ -434,6 +500,7 @@ public sealed class ScanCoordinator
                 if (freshIndex.Status != IndexStatus.Current || freshIndex.Generation != index.Generation)
                 {
                     errors.Add($"{path}: index generation changed before routing; retry required.");
+                    outcome = "Index changed; retry needed";
                     continue;
                 }
 
@@ -445,6 +512,7 @@ public sealed class ScanCoordinator
                         cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
                 moved++;
+                outcome = "Archived as unique";
             }
             catch (Exception exception) when (
                 exception is IOException
@@ -454,14 +522,16 @@ public sealed class ScanCoordinator
                     or NotSupportedException)
             {
                 errors.Add($"{path}: {exception.Message}");
+                outcome = "Failed";
             }
             finally
             {
                 if (!readingReported)
                 {
-                    onImageScanned?.Invoke();
+                    onImageScanned?.Invoke("Reading", fileName);
                 }
-                onImageProcessed?.Invoke();
+
+                onImageProcessed?.Invoke(outcome, fileName);
             }
         }
 
@@ -475,14 +545,14 @@ public sealed class ScanCoordinator
                         Kind = ActivityKind.Scan,
                         Level = errors.Count == 0 ? ActivityLevel.Information : ActivityLevel.Warning,
                         Category = category,
-                        Message = $"Scanned {sourceRoot}: {examined} examined, {moved} moved, {held} queued, {skipped} skipped, {errors.Count} failed.",
+                        Message = $"Scanned {sourceRoot}: {examined} examined, {moved} moved, {autoKept} exact duplicates recycled, {held} queued, {skipped} skipped, {errors.Count} failed.",
                         SourcePath = sourceRoot,
                     });
                     return true;
                 },
                 cancellationToken).ConfigureAwait(false);
 
-        return new CategoryScanResult(category, examined, moved, held, skipped, errors);
+        return new CategoryScanResult(category, examined, moved, held, skipped, errors, autoKept);
     }
 
     private static SourceSnapshot CreateSourceSnapshotSafe(string sourceRoot)
@@ -573,13 +643,14 @@ public sealed class ScanCoordinator
 
     private static void ReportUnprocessed(
         int count,
-        Action? onImageScanned,
-        Action? onImageProcessed)
+        string activity,
+        Action<string, string?>? onImageScanned,
+        Action<string, string?>? onImageProcessed)
     {
         for (var index = 0; index < count; index++)
         {
-            onImageScanned?.Invoke();
-            onImageProcessed?.Invoke();
+            onImageScanned?.Invoke(activity, null);
+            onImageProcessed?.Invoke(activity, null);
         }
     }
 

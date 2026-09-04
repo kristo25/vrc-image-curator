@@ -59,6 +59,7 @@ public partial class App : System.Windows.Application
                 ExitApplication);
             _runtime.Watcher.ScanCompleted += WatcherScanCompleted;
             _runtime.Watcher.ScanFailed += WatcherScanFailed;
+            _runtime.Watcher.ChangesDetected += WatcherChangesDetected;
 
             if (options.Background && !_runtime.Watcher.IsRunning)
             {
@@ -222,6 +223,23 @@ public partial class App : System.Windows.Application
                     {
                         ActivateMainWindow();
                     }
+                }
+            });
+    }
+
+    private void WatcherChangesDetected(object? sender, WatchDetectionEventArgs detection)
+    {
+        if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+        {
+            return;
+        }
+
+        _ = Dispatcher.BeginInvoke(
+            () =>
+            {
+                if (MainWindow is MainWindow window)
+                {
+                    window.ReportWatchDetection(detection.Category, detection.FileName);
                 }
             });
     }

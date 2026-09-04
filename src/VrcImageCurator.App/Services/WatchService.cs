@@ -16,6 +16,7 @@ public sealed class WatchService : IDisposable
     private readonly List<FileSystemWatcher> _watchers = [];
     private readonly List<WatchTarget> _targets = [];
     private System.Threading.Timer? _retryTimer;
+    private System.Threading.Timer? _sweepTimer;
     private CancellationTokenSource _runCancellation = new();
     private bool _isRunning;
     private bool _disposed;
@@ -36,6 +37,9 @@ public sealed class WatchService : IDisposable
 
     public event EventHandler<WatcherFailureEventArgs>? ScanFailed;
 
+    /// <summary>Raised as soon as the watcher reports a source file, before any scan runs.</summary>
+    public event EventHandler<WatchDetectionEventArgs>? ChangesDetected;
+
     public bool IsRunning
     {
         get
@@ -49,7 +53,8 @@ public sealed class WatchService : IDisposable
 
     public void Start(
         IEnumerable<CategoryMapping> mappings,
-        IEnumerable<LegacyArchiveMapping>? legacyArchives = null)
+        IEnumerable<LegacyArchiveMapping>? legacyArchives = null,
+        TimeSpan? sweepInterval = null)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         var replacements = new List<FileSystemWatcher>();
@@ -105,6 +110,18 @@ public sealed class WatchService : IDisposable
                 _retryTimer = _isRunning
                     ? new System.Threading.Timer(_ => RetryAttachNewlyAvailableFolders(), null, _retryInterval, _retryInterval)
                     : null;
+
+                // Periodic safety net: filesystem notifications can be dropped, so sweep the
+                // whole category on a fixed interval as well.
+                _sweepTimer?.Dispose();
+                var categories = enabledMappings.Select(item => item.Category).ToArray();
+                _sweepTimer = _isRunning && sweepInterval is { } interval && interval > TimeSpan.Zero
+                    ? new System.Threading.Timer(
+                        _ => RequestPeriodicSweep(categories),
+                        null,
+                        interval,
+                        interval)
+                    : null;
             }
         }
         catch
@@ -117,6 +134,8 @@ public sealed class WatchService : IDisposable
                 _isRunning = false;
                 _retryTimer?.Dispose();
                 _retryTimer = null;
+                _sweepTimer?.Dispose();
+                _sweepTimer = null;
             }
 
             throw;
@@ -137,6 +156,8 @@ public sealed class WatchService : IDisposable
             _pending.Clear();
             _retryTimer?.Dispose();
             _retryTimer = null;
+            _sweepTimer?.Dispose();
+            _sweepTimer = null;
             DisposeWatchers(_watchers);
             _watchers.Clear();
             _targets.Clear();
@@ -159,6 +180,7 @@ public sealed class WatchService : IDisposable
 
         _disposed = true;
         StopAsync().GetAwaiter().GetResult();
+        _sweepTimer?.Dispose();
         _runCancellation.Dispose();
         _scanGate.Dispose();
     }
@@ -191,11 +213,13 @@ public sealed class WatchService : IDisposable
             EnableRaisingEvents = false,
         };
         FileSystemEventHandler changed = (_, e) => Queue(category, archive, e.FullPath);
+        FileSystemEventHandler removed = (_, _) => Queue(category, archive, path: null);
         RenamedEventHandler renamed = (_, e) => Queue(category, archive, e.FullPath);
         ErrorEventHandler error = (_, _) => HandleWatcherError(watcher, category, archive);
         watcher.Created += changed;
         watcher.Changed += changed;
-        watcher.Deleted += changed;
+        // A deleted file carries a path but is not an arrival, so it must not be announced.
+        watcher.Deleted += removed;
         watcher.Renamed += renamed;
         watcher.Error += error;
         watchers.Add(watcher);
@@ -222,6 +246,7 @@ public sealed class WatchService : IDisposable
         string? path,
         bool requestFullScan = false)
     {
+        bool announced;
         lock (_sync)
         {
             if (_disposed || !_isRunning)
@@ -231,23 +256,33 @@ public sealed class WatchService : IDisposable
 
             if (_pending.TryGetValue(category, out var existing))
             {
-                Accumulate(existing, archive, path, requestFullScan);
+                announced = Accumulate(existing, archive, path, requestFullScan);
                 existing.Timer.Change(_debounce, Timeout.InfiniteTimeSpan);
-                return;
             }
+            else
+            {
+                var pending = new PendingCategory(archive);
+                announced = Accumulate(pending, archive, path, requestFullScan);
+                pending.Timer = new System.Threading.Timer(
+                    _ => _ = ProcessAsync(category),
+                    null,
+                    _debounce,
+                    Timeout.InfiniteTimeSpan);
+                _pending[category] = pending;
+            }
+        }
 
-            var pending = new PendingCategory(archive);
-            Accumulate(pending, archive, path, requestFullScan);
-            pending.Timer = new System.Threading.Timer(
-                _ => _ = ProcessAsync(category),
-                null,
-                _debounce,
-                Timeout.InfiniteTimeSpan);
-            _pending[category] = pending;
+        // Raised outside the lock: handlers marshal to the UI thread and must never block it.
+        if (announced)
+        {
+            ChangesDetected?.Invoke(
+                this,
+                new WatchDetectionEventArgs(category, Path.GetFileName(path!)));
         }
     }
 
-    private static void Accumulate(
+    /// <summary>Returns true when this call added a source file that was not already pending.</summary>
+    private static bool Accumulate(
         PendingCategory pending,
         bool archive,
         string? path,
@@ -255,9 +290,23 @@ public sealed class WatchService : IDisposable
     {
         pending.ArchiveChanged |= archive;
         pending.FullScanRequested |= requestFullScan;
-        if (!archive && !string.IsNullOrWhiteSpace(path))
+        return !archive
+            && !string.IsNullOrWhiteSpace(path)
+            && pending.SourcePaths.Add(path);
+    }
+
+    private void RequestPeriodicSweep(IReadOnlyList<VrcImageCategory> categories)
+    {
+        try
         {
-            pending.SourcePaths.Add(path);
+            foreach (var category in categories)
+            {
+                Queue(category, archive: false, path: null, requestFullScan: true);
+            }
+        }
+        catch (Exception exception)
+        {
+            System.Diagnostics.Debug.WriteLine($"Periodic watch sweep could not be queued: {exception}");
         }
     }
 
@@ -432,3 +481,5 @@ public sealed class WatchService : IDisposable
 }
 
 public sealed record WatcherFailureEventArgs(VrcImageCategory Category, Exception Exception);
+
+public sealed record WatchDetectionEventArgs(VrcImageCategory Category, string FileName);

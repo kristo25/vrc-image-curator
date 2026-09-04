@@ -14,7 +14,8 @@ public sealed record SettingsDraft(
     string OutputRootPath,
     SimilarityProfile SimilarityProfile,
     bool StartWithWindows,
-    bool BringReviewForwardWhenHeld)
+    bool BringReviewForwardWhenHeld,
+    int WatchScanSeconds = AutomationSettings.DefaultWatchScanSeconds)
 {
     /// <summary>
     /// Returns the first invariant this draft would break, or <see langword="null"/> when it is
@@ -141,6 +142,10 @@ public sealed record SettingsDraft(
         state.Settings.SimilarityProfile = SimilarityProfile;
         state.Settings.Automation.WatchWhileOpen = false;
         state.Settings.Automation.StartWithWindows = StartWithWindows;
+        state.Settings.Automation.WatchScanSeconds = Math.Clamp(
+            WatchScanSeconds,
+            AutomationSettings.MinimumWatchScanSeconds,
+            AutomationSettings.MaximumWatchScanSeconds);
         state.Settings.BringReviewForwardWhenHeld = BringReviewForwardWhenHeld;
     }
 }

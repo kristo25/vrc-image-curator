@@ -113,11 +113,14 @@ internal static class ImageFixtureFactory
             [new DecodedImageFrame(pixels, 0)]);
     }
 
-    public static IReadOnlyList<Image<Rgba32>> CreatePerceptualVariants(Image<Rgba32> source)
+    /// <summary>
+    /// A visibly identical but not byte-identical copy: close enough to be proposed as a review
+    /// candidate, different enough that it is never an exact match.
+    /// </summary>
+    public static Image<Rgba32> CreateNearDuplicate(Image<Rgba32> source)
     {
-        var resized = source.Clone(context => context.Resize(source.Width + 19, source.Height + 13));
-        var lightlyRecolored = source.Clone();
-        lightlyRecolored.ProcessPixelRows(accessor =>
+        var variant = source.Clone();
+        variant.ProcessPixelRows(accessor =>
         {
             for (var y = 0; y < accessor.Height; y++)
             {
@@ -133,6 +136,13 @@ internal static class ImageFixtureFactory
                 }
             }
         });
+        return variant;
+    }
+
+    public static IReadOnlyList<Image<Rgba32>> CreatePerceptualVariants(Image<Rgba32> source)
+    {
+        var resized = source.Clone(context => context.Resize(source.Width + 19, source.Height + 13));
+        var lightlyRecolored = CreateNearDuplicate(source);
         var cropped = source.Clone(context => context
             .Crop(new Rectangle(2, 2, source.Width - 4, source.Height - 4))
             .Resize(source.Width, source.Height));

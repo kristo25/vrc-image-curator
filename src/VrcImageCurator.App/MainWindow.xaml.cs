@@ -19,6 +19,7 @@ public partial class MainWindow : Window
     private readonly LatestRequestGuard _reviewDisplayRequests = new();
     private bool _busy;
     private bool _loadingSettings;
+    private CancellationTokenSource? _operationCancellation;
     private bool _scanProgressActive;
     private Guid? _validatedIncomingReviewId;
     private bool _validatedIncomingCurrent;
@@ -134,6 +135,8 @@ public partial class MainWindow : Window
             StartWithWindowsCheck.IsChecked = settings.Automation.StartWithWindows;
             StartWithWindowsCheck.IsEnabled = _runtime.AllowStartupRegistration;
             BringReviewForwardCheck.IsChecked = settings.BringReviewForwardWhenHeld;
+            WatchScanSeconds.Text = settings.Automation.WatchScanSeconds.ToString(
+                System.Globalization.CultureInfo.CurrentCulture);
             UpdateStartupStatusText();
             var missingFolders = CaptureSettingsDraftOrNull()?.DescribeMissingFolders();
             ShowSettingsNotice(
@@ -327,8 +330,9 @@ public partial class MainWindow : Window
                 var progress = new Progress<ScanProgress>(UpdateScanProgress);
                 var processingProgress = new Progress<ScanProcessingProgress>(UpdateScanProcessingProgress);
                 var results = await _runtime.Scanner.ScanAllAsync(
-                    progress: progress,
-                    processingProgress: processingProgress);
+                    progress,
+                    processingProgress,
+                    CurrentCancellation);
                 if (results.Count == 0)
                 {
                     SetStatus("Nothing scanned: enable at least one category in Settings.");
@@ -338,10 +342,13 @@ public partial class MainWindow : Window
 
                 var moved = results.Sum(result => result.MovedUnique);
                 var held = results.Sum(result => result.HeldForReview);
+                var autoKept = results.Sum(result => result.AutoKeptArchived);
                 var examined = results.Sum(result => result.Examined);
                 var skipped = results.Sum(result => result.Skipped);
                 var errors = results.Sum(result => result.Errors.Count);
-                SetStatus($"Scan complete: {examined} examined, {moved} moved, {held} queued, {skipped} skipped, {errors} failed.");
+                SetStatus(
+                    $"Scan complete: {examined} examined, {moved} archived, {autoKept} exact duplicates recycled, "
+                    + $"{held} queued for review, {skipped} skipped, {errors} failed.");
                 await ReportScanErrorsAsync(results.SelectMany(result => result.Errors));
                 await RefreshAsync();
                 ShowPage(ReviewPage);
@@ -376,9 +383,13 @@ public partial class MainWindow : Window
                 var result = await _runtime.Scanner.ScanFolderAsync(
                     picker.FolderName,
                     categoryDialog.SelectedCategory,
-                    progress: progress,
-                    processingProgress: processingProgress);
-                SetStatus($"Folder scan complete: {result.Examined} examined, {result.MovedUnique} moved, {result.HeldForReview} queued, {result.Skipped} skipped, {result.Errors.Count} failed.");
+                    progress,
+                    processingProgress,
+                    CurrentCancellation);
+                SetStatus(
+                    $"Folder scan complete: {result.Examined} examined, {result.MovedUnique} archived, "
+                    + $"{result.AutoKeptArchived} exact duplicates recycled, {result.HeldForReview} queued for review, "
+                    + $"{result.Skipped} skipped, {result.Errors.Count} failed.");
                 await ReportScanErrorsAsync(result.Errors);
                 await RefreshAsync();
                 ShowPage(ReviewPage);
@@ -597,7 +608,7 @@ public partial class MainWindow : Window
             {
                 BeginReturnProgress(reviews.Length);
                 var progress = new Progress<ReviewRestoreProgress>(UpdateReturnProgress);
-                var result = await _runtime.Router.RestoreReviewsAsync(reviews, progress);
+                var result = await _runtime.Router.RestoreReviewsAsync(reviews, progress, CurrentCancellation);
 
                 await RefreshAsync(selectFirst: false);
                 SetStatus(result.Failures.Count == 0
@@ -916,8 +927,21 @@ public partial class MainWindow : Window
             outputRoot,
             (SimilarityProfile?)SimilarityCombo.SelectedItem ?? SimilarityProfile.Conservative,
             StartWithWindowsCheck.IsChecked == true,
-            BringReviewForwardCheck.IsChecked == true);
+            BringReviewForwardCheck.IsChecked == true,
+            ParseWatchScanSeconds(WatchScanSeconds.Text));
     }
+
+    private static int ParseWatchScanSeconds(string? text) =>
+        int.TryParse(
+            text,
+            System.Globalization.NumberStyles.Integer,
+            System.Globalization.CultureInfo.CurrentCulture,
+            out var seconds)
+            ? Math.Clamp(
+                seconds,
+                AutomationSettings.MinimumWatchScanSeconds,
+                AutomationSettings.MaximumWatchScanSeconds)
+            : AutomationSettings.DefaultWatchScanSeconds;
 
     private async void RebuildIndexes(object sender, RoutedEventArgs e)
     {
@@ -928,7 +952,7 @@ public partial class MainWindow : Window
                 var state = await _runtime.StateStore.LoadAsync();
                 foreach (var mapping in state.Settings.CategoryMappings.Where(item => item.IsEnabled))
                 {
-                    await _runtime.Indexer.RebuildAsync(mapping.Category);
+                    await _runtime.Indexer.RebuildAsync(mapping.Category, CurrentCancellation);
                 }
 
                 StatusText.Text = "Archive indexes rebuilt.";
@@ -1038,7 +1062,7 @@ public partial class MainWindow : Window
             "Retrying recoverable file operations...",
             async () =>
             {
-                var decisions = await _runtime.Router.RecoverPendingOperationsAsync();
+                var decisions = await _runtime.Router.RecoverPendingOperationsAsync(CurrentCancellation);
                 await RefreshAsync(selectFirst: false);
                 var unresolved = (await _runtime.StateStore.LoadAsync()).OperationJournal.Count;
                 SetStatus($"Recovery checked {decisions.Count} operation(s); {unresolved} still need attention.");
@@ -1109,11 +1133,13 @@ public partial class MainWindow : Window
         }
 
         _busy = true;
+        _operationCancellation = new CancellationTokenSource();
         ScanButton.IsEnabled = false;
         ScanAnotherButton.IsEnabled = false;
         WatchButton.IsEnabled = false;
         RetryRecoveryButton.IsEnabled = false;
         DismissRecoveryButton.IsEnabled = false;
+        StopButton.IsEnabled = true;
         SetStatus(status);
         if (SelectedReview is { } review)
         {
@@ -1124,9 +1150,15 @@ public partial class MainWindow : Window
         {
             await action();
         }
+        catch (OperationCanceledException)
+        {
+            // Every file operation is journaled and verified before it runs, so stopping
+            // between images can never leave one half-moved.
+            SetStatus("Stopped. Images already handled are done; nothing was left half-moved.");
+        }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or InvalidOperationException or NotSupportedException or ArgumentException)
         {
-            SetStatus("Action failed. No permanent deletion fallback was used.");
+            SetStatus("Action failed. No image was deleted and no permanent deletion fallback was used.");
             var logPath = await DiagnosticLog.TryWriteAsync(_runtime.StateDirectory, exception);
             var details = logPath is null
                 ? "\n\nThe diagnostic log could not be written."
@@ -1137,6 +1169,9 @@ public partial class MainWindow : Window
         {
             EndScanProgress();
             _busy = false;
+            _operationCancellation?.Dispose();
+            _operationCancellation = null;
+            StopButton.IsEnabled = false;
             ScanButton.IsEnabled = true;
             ScanAnotherButton.IsEnabled = true;
             WatchButton.IsEnabled = true;
@@ -1146,6 +1181,29 @@ public partial class MainWindow : Window
                 UpdateActionAvailability(currentReview);
             }
         }
+    }
+
+    private CancellationToken CurrentCancellation => _operationCancellation?.Token ?? CancellationToken.None;
+
+    private void StopCurrentOperation(object sender, RoutedEventArgs e)
+    {
+        if (_operationCancellation is not { IsCancellationRequested: false })
+        {
+            return;
+        }
+
+        StopButton.IsEnabled = false;
+        SetStatus("Stopping after the current image...");
+        _operationCancellation.Cancel();
+    }
+
+    public void ReportWatchDetection(VrcImageCategory category, string fileName) =>
+        SetStatus($"New entry detected: {fileName} ({category}).");
+
+    private static string DescribeStep(string activity, string? fileName, string fallback)
+    {
+        var label = string.IsNullOrWhiteSpace(activity) ? fallback : activity;
+        return string.IsNullOrWhiteSpace(fileName) ? label : $"{label}: {fileName}";
     }
 
     private void ShowReviewPage(object sender, RoutedEventArgs e) => ShowPage(ReviewPage);
@@ -1260,12 +1318,14 @@ public partial class MainWindow : Window
         ScanProgressBar.Maximum = 1;
         ScanProgressBar.Value = 0;
         ScanProgressText.Text = "Counting";
+        ScanFileText.Text = string.Empty;
         ProcessingProgressPanel.Visibility = Visibility.Collapsed;
         ProcessingProgressBar.IsIndeterminate = false;
         ProcessingProgressBar.Minimum = 0;
         ProcessingProgressBar.Maximum = 1;
         ProcessingProgressBar.Value = 0;
         ProcessingProgressText.Text = string.Empty;
+        ProcessingActivityText.Text = string.Empty;
     }
 
     private void UpdateScanProgress(ScanProgress progress)
@@ -1280,7 +1340,11 @@ public partial class MainWindow : Window
         ScanProgressBar.Maximum = Math.Max(1, progress.TotalImages);
         ScanProgressBar.Value = Math.Min(progress.ScannedImages, ScanProgressBar.Maximum);
         ScanProgressText.Text = $"{progress.ScannedImages} / {progress.TotalImages}";
-        SetStatus($"Scanning {progress.Category}: {progress.ScannedImages} of {progress.TotalImages} images.");
+        ScanProgressLabel.Text = string.IsNullOrWhiteSpace(progress.Activity) ? "Reading" : progress.Activity;
+        ScanFileText.Text = progress.FileName ?? string.Empty;
+        SetStatus(
+            $"{progress.Category} - {DescribeStep(progress.Activity, progress.FileName, "Reading")} "
+            + $"({progress.ScannedImages} of {progress.TotalImages}).");
     }
 
     private void UpdateScanProcessingProgress(ScanProcessingProgress progress)
@@ -1295,7 +1359,7 @@ public partial class MainWindow : Window
         ProcessingProgressBar.Maximum = Math.Max(1, progress.TotalImages);
         ProcessingProgressBar.Value = Math.Min(progress.ProcessedImages, ProcessingProgressBar.Maximum);
         ProcessingProgressText.Text = $"{progress.ProcessedImages} / {progress.TotalImages}";
-        SetStatus($"Processing scan results: {progress.ProcessedImages} of {progress.TotalImages} images.");
+        ProcessingActivityText.Text = DescribeStep(progress.Activity, progress.FileName, "Processing");
     }
 
     private void BeginReturnProgress(int total)
@@ -1309,6 +1373,7 @@ public partial class MainWindow : Window
         ScanProgressBar.Maximum = Math.Max(1, total);
         ScanProgressBar.Value = 0;
         ScanProgressText.Text = $"0 / {total}";
+        ScanFileText.Text = string.Empty;
         SetStatus($"Clearing review queue: 0 of {total} processed.");
     }
 
@@ -1330,6 +1395,7 @@ public partial class MainWindow : Window
     private void EndScanProgress()
     {
         _scanProgressActive = false;
+        ScanFileText.Text = string.Empty;
         ScanProgressBar.IsIndeterminate = false;
         ScanProgressPanel.Visibility = Visibility.Collapsed;
         ProcessingProgressBar.IsIndeterminate = false;

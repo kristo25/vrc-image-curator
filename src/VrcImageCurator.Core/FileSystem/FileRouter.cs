@@ -143,6 +143,39 @@ public sealed class FileRouter
         await ExecuteRecycleAsync(entry, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Resolves an exact duplicate without review: the archived image is kept and the incoming
+    /// copy goes to the Recycle Bin. Throws <see cref="NotSupportedException"/> when the Recycle
+    /// Bin is unavailable for the incoming path, so the caller can fall back to a review instead
+    /// of ever deleting permanently.
+    /// </summary>
+    public async Task AutoKeepArchivedAsync(
+        string incomingPath,
+        VrcImageCategory category,
+        ImageFingerprint incomingFingerprint,
+        string archivePath,
+        string archiveFingerprint,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(incomingFingerprint);
+
+        // The archived copy must still be exactly what was indexed before the incoming one is
+        // discarded, otherwise this would delete the only remaining copy.
+        await VerifyImageFingerprintAsync(
+                archivePath,
+                archiveFingerprint,
+                "The archive match changed after it was scanned. No file operation was performed.",
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        var entry = CreateRecycleEntry(
+            incomingPath,
+            category,
+            incomingFingerprint.ExactIdentity,
+            JournalOperationPurpose.AutoKeepArchived);
+        await ExecuteRecycleAsync(entry, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task KeepMatchAsync(
         ReviewItem reviewItem,
         ReviewCandidate candidate,
@@ -631,6 +664,7 @@ public sealed class FileRouter
                 ResolveReview(state, entry.ReviewItemId);
                 break;
             case JournalOperationPurpose.KeepExisting:
+            case JournalOperationPurpose.AutoKeepArchived:
             case JournalOperationPurpose.RestoreReviewToSource:
                 ResolveReview(state, entry.ReviewItemId);
                 break;
@@ -668,11 +702,14 @@ public sealed class FileRouter
             {
                 JournalOperationPurpose.MoveUnique => ActivityKind.AutomaticMove,
                 JournalOperationPurpose.DeleteArchiveCandidate => ActivityKind.DeletionRequested,
+                JournalOperationPurpose.AutoKeepArchived => ActivityKind.DeletionRequested,
                 _ => ActivityKind.ReviewDecision,
             },
             Level = ActivityLevel.Information,
             Category = entry.Category,
-            Message = entry.Purpose.ToString(),
+            Message = entry.Purpose == JournalOperationPurpose.AutoKeepArchived
+                ? "Exact duplicate: kept the archived image and recycled the incoming copy."
+                : entry.Purpose.ToString(),
             SourcePath = entry.SourcePath,
             DestinationPath = entry.DestinationPath,
             OperationId = entry.Id,
