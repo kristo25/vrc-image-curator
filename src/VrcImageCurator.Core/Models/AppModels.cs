@@ -339,8 +339,10 @@ public static class AppStateDefaults
         userProfilePath ??= Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         localAppDataPath ??= Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
 
-        var sourceRoot = Path.Combine(userProfilePath, "OneDrive", "Images", "VRChat");
-        var archiveRoot = Path.Combine(userProfilePath, "Pictures", "VRC Images");
+        // Local (non-OneDrive) VRChat image root. The archive lives beside the category
+        // folders rather than inside any of them, so no source ever contains the archive.
+        var sourceRoot = Path.Combine(userProfilePath, "Images", "VRChat");
+        var archiveRoot = Path.Combine(sourceRoot, "Archived Images");
 
         return new AppStateDocument
         {

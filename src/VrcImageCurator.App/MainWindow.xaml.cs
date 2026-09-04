@@ -822,7 +822,7 @@ public partial class MainWindow : Window
             if (MessageBox.Show(
                     this,
                     $"Create the main output folder and category folders?\n{draft.OutputRootPath}",
-                    "Create VRC Images folder",
+                    "Create output folder",
                     MessageBoxButton.YesNo,
                     MessageBoxImage.Question) != MessageBoxResult.Yes)
             {

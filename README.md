@@ -26,7 +26,7 @@ PNG, animated GIF, JPG/JPEG, WebP, and BMP are supported. MP4, `.temp`, and unsu
 1. Run `VrcImageCurator.exe`.
 2. Open **Settings**.
 3. Choose the source folders and enable the categories you want to use.
-4. Choose one main output folder. The default is `Pictures\VRC Images`.
+4. Choose one main output folder. The default is `Images\VRChat\Archived Images` beneath your user folder.
 5. Save settings, then select **Scan now**.
 6. Use **Scan another folder** for a one-time recursive scan outside the configured VRCX folders.
 7. Use **Start watching** when you want the app to monitor configured folders during the current session. Temporarily unavailable folders are attached automatically when they return.
@@ -35,8 +35,10 @@ PNG, animated GIF, JPG/JPEG, WebP, and BMP are supported. MP4, `.temp`, and unsu
 Suggested VRCX source root:
 
 ```text
-C:\Users\<you>\OneDrive\Images\VRChat
+C:\Users\<you>\Images\VRChat
 ```
+
+The default category folders are `Emoji`, `Prints`, and `Stickers` beneath that root, and the default archive is `Archived Images` beside them.
 
 The app suggests category folders beneath that root. Source paths remain editable. New files are written beneath the single output root while preserving their category-relative path. For example, `Emoji\2025-05\image.png` moves to `<output>\Emoji\2025-05\image.png`.
 

@@ -235,7 +235,7 @@
                             <TextBlock FontWeight="SemiBold" Text="Main output folder" />
                             <TextBlock FontSize="12" Foreground="{StaticResource MutedTextBrush}" Text="Category and source subfolders are preserved." />
                         </StackPanel>
-                        <TextBox x:Name="OutputRoot" Grid.Column="1" TextChanged="OutputRootChanged" automation:AutomationProperties.Name="Main VRC Images output folder" />
+                        <TextBox x:Name="OutputRoot" Grid.Column="1" TextChanged="OutputRootChanged" automation:AutomationProperties.Name="Main output folder" />
                         <Button Grid.Column="2" Margin="6,0,0,0" Padding="8" Content="..." Tag="OutputRoot" Click="BrowseFolder" automation:AutomationProperties.Name="Browse main output folder" />
                     </Grid>
 
