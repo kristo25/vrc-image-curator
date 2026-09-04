@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.IO;
 using System.Windows;
+using System.Windows.Threading;
 using VrcImageCurator.App.Services;
 using MessageBox = System.Windows.MessageBox;
 
@@ -16,6 +17,10 @@ public partial class App : System.Windows.Application
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        DispatcherUnhandledException += OnDispatcherUnhandledException;
+        AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandledException;
+        TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
 
         AppLaunchOptions options;
         try
@@ -79,6 +84,56 @@ public partial class App : System.Windows.Application
                 MessageBoxImage.Error);
             Shutdown(1);
         }
+    }
+
+    private string DiagnosticDirectory => _runtime?.StateDirectory ?? Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "VrcImageCurator");
+
+    /// <summary>
+    /// Keeps the process alive after an unexpected UI failure. Terminating here would abandon
+    /// any file operation whose journal entry still needs reconciliation, so the safer outcome
+    /// is to report the failure and let the user retry or use Operation recovery.
+    /// </summary>
+    private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
+    {
+        e.Handled = true;
+        var logPath = DiagnosticLog.TryWrite(DiagnosticDirectory, e.Exception);
+        try
+        {
+            if (MainWindow is MainWindow window)
+            {
+                window.ReportBackgroundFailure("Unexpected error", e.Exception.Message, logPath);
+            }
+
+            var details = logPath is null ? string.Empty : $"\n\nDetails were written to:\n{logPath}";
+            MessageBox.Show(
+                $"An unexpected error occurred. No image was deleted as a result.\n\n{e.Exception.Message}{details}",
+                "VRC Image Curator",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+        catch (Exception reportingException)
+        {
+            System.Diagnostics.Debug.WriteLine($"Failed to report an unhandled exception: {reportingException}");
+        }
+    }
+
+    /// <summary>
+    /// The runtime terminates after this callback, so it only records what happened.
+    /// </summary>
+    private void OnDomainUnhandledException(object sender, UnhandledExceptionEventArgs e)
+    {
+        if (e.ExceptionObject is Exception exception)
+        {
+            _ = DiagnosticLog.TryWrite(DiagnosticDirectory, exception);
+        }
+    }
+
+    private void OnUnobservedTaskException(object? sender, UnobservedTaskExceptionEventArgs e)
+    {
+        e.SetObserved();
+        _ = DiagnosticLog.TryWrite(DiagnosticDirectory, e.Exception);
     }
 
     protected override void OnExit(ExitEventArgs e)

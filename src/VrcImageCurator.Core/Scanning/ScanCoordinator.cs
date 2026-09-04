@@ -266,7 +266,10 @@ public sealed class ScanCoordinator
             return new CategoryScanResult(category, 0, 0, 0, 0, indexResult.Errors);
         }
 
-        var errors = new List<string>();
+        // Individual unreadable archive files are surfaced as scan warnings, not as a
+        // reason to abort the category.
+        var errors = new List<string>(
+            indexResult.SkippedFiles.Select(skipped => $"Archive file skipped - {skipped}"));
         var examined = 0;
         var moved = 0;
         var held = 0;

@@ -117,4 +117,35 @@ public sealed class ArchiveIndexerTests
         Assert.Contains(refreshed.Images, item => item.Path == added);
         Assert.DoesNotContain(refreshed.Images, item => item.Path == removed);
     }
+
+    [Fact]
+    public async Task UnreadableArchiveFileIsSkippedWithoutDisablingTheCategory()
+    {
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        var readable = Path.Combine(archiveRoot, "readable.png");
+        using (var image = ImageFixtureFactory.CreatePattern(206))
+        {
+            await image.SaveAsPngAsync(readable);
+        }
+
+        var unreadable = Path.Combine(archiveRoot, "unreadable.png");
+        await File.WriteAllBytesAsync(unreadable, [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]);
+
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var indexer = new ArchiveIndexer(store, new ImageDecoder());
+
+        var result = await indexer.RefreshAsync(VrcImageCategory.Emoji);
+        var index = (await store.LoadAsync()).ArchiveIndex.Categories[0];
+
+        Assert.Equal(IndexStatus.Current, result.Status);
+        Assert.Equal(IndexStatus.Current, index.Status);
+        Assert.Empty(result.Errors);
+        Assert.Contains(unreadable, Assert.Single(result.SkippedFiles));
+        Assert.Equal(readable, Assert.Single(index.Images).Path);
+        Assert.NotNull(index.LastError);
+    }
 }

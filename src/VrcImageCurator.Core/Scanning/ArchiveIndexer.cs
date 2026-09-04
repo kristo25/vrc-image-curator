@@ -5,12 +5,19 @@ using VrcImageCurator.Core.Storage;
 
 namespace VrcImageCurator.Core.Scanning;
 
+/// <summary>
+/// The outcome of an archive index build.
+/// <para><see cref="Errors"/> reports folder-level failures that make the index unusable.</para>
+/// <para><see cref="SkippedFiles"/> reports individual files that could not be decoded. Skipped
+/// files are excluded from matching but never make the whole category unusable.</para>
+/// </summary>
 public sealed record ArchiveIndexResult(
     VrcImageCategory Category,
     IndexStatus Status,
     long Generation,
     int IndexedFiles,
-    IReadOnlyList<string> Errors);
+    IReadOnlyList<string> Errors,
+    IReadOnlyList<string> SkippedFiles);
 
 public sealed class ArchiveIndexer
 {
@@ -68,7 +75,13 @@ public sealed class ArchiveIndexer
         {
             await PublishUnavailableAsync(category, "Archive folder is unavailable.", cancellationToken)
                 .ConfigureAwait(false);
-            return new ArchiveIndexResult(category, IndexStatus.Unavailable, 0, 0, ["Archive folder is unavailable."]);
+            return new ArchiveIndexResult(
+                category,
+                IndexStatus.Unavailable,
+                0,
+                0,
+                ["Archive folder is unavailable."],
+                []);
         }
 
         if (!reuseUnchanged)
@@ -76,7 +89,7 @@ public sealed class ArchiveIndexer
             await SetStatusAsync(category, IndexStatus.Building, null, cancellationToken).ConfigureAwait(false);
         }
 
-        var errors = new List<string>();
+        var skipped = new List<string>();
         var indexed = new List<IndexedImageRecord>();
         IEnumerable<string> paths;
         try
@@ -90,7 +103,13 @@ public sealed class ArchiveIndexer
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             await PublishUnavailableAsync(category, exception.Message, cancellationToken).ConfigureAwait(false);
-            return new ArchiveIndexResult(category, IndexStatus.Unavailable, 0, 0, [exception.Message]);
+            return new ArchiveIndexResult(
+                category,
+                IndexStatus.Unavailable,
+                0,
+                0,
+                [exception.Message],
+                []);
         }
 
         foreach (var path in paths)
@@ -110,7 +129,8 @@ public sealed class ArchiveIndexer
             var decoded = await _decoder.DecodeAsync(path, cancellationToken).ConfigureAwait(false);
             if (!decoded.IsSuccess)
             {
-                errors.Add($"{path}: {decoded.Failure!.Message}");
+                // A single unreadable archive file must not disable the whole category.
+                skipped.Add($"{path}: {decoded.Failure!.Message}");
                 continue;
             }
 
@@ -131,7 +151,7 @@ public sealed class ArchiveIndexer
             });
         }
 
-        if (errors.Count == 0
+        if (skipped.Count == 0
             && reuseUnchanged
             && previousIndex.Status == IndexStatus.Current
             && HaveSameFileSet(previousIndex.Images, indexed))
@@ -153,7 +173,8 @@ public sealed class ArchiveIndexer
                 IndexStatus.Current,
                 previousIndex.Generation,
                 indexed.Count,
-                errors);
+                [],
+                skipped);
         }
 
         ArchiveIndexResult result;
@@ -175,30 +196,33 @@ public sealed class ArchiveIndexer
                     }
 
                     index.Images = indexed;
-                    index.Status = errors.Count == 0 ? IndexStatus.Current : IndexStatus.Unavailable;
+                    index.Status = IndexStatus.Current;
                     index.LastCompletedUtc = _timeProvider.GetUtcNow();
-                    index.LastError = errors.Count == 0 ? null : string.Join(Environment.NewLine, errors.Take(10));
-                    if (!reuseUnchanged || changed || errors.Count > 0)
+                    index.LastError = skipped.Count == 0
+                        ? null
+                        : string.Join(Environment.NewLine, skipped.Take(10));
+                    if (!reuseUnchanged || changed || skipped.Count > 0)
                     {
                         current.History.Add(new ActivityEntry
                         {
                             Id = Guid.NewGuid(),
                             OccurredUtc = _timeProvider.GetUtcNow(),
                             Kind = ActivityKind.Scan,
-                            Level = errors.Count == 0 ? ActivityLevel.Information : ActivityLevel.Warning,
+                            Level = skipped.Count == 0 ? ActivityLevel.Information : ActivityLevel.Warning,
                             Category = category,
-                            Message = errors.Count == 0
+                            Message = skipped.Count == 0
                                 ? $"Indexed {indexed.Count} archive images."
-                                : $"Index stopped with {errors.Count} unreadable image(s).",
+                                : $"Indexed {indexed.Count} archive images; skipped {skipped.Count} unreadable file(s).",
                         });
                     }
 
                     return new ArchiveIndexResult(
-                    category,
-                    index.Status,
-                    index.Generation,
-                    indexed.Count,
-                    errors);
+                        category,
+                        index.Status,
+                        index.Generation,
+                        indexed.Count,
+                        [],
+                        skipped);
                 },
                 cancellationToken).ConfigureAwait(false);
         }

@@ -641,4 +641,36 @@ public sealed class ScanCoordinatorTests
             await Task.Delay(10);
         }
     }
+
+    [Fact]
+    public async Task UnreadableArchiveFileDoesNotBlockScanningTheCategory()
+    {
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        using var archived = ImageFixtureFactory.CreatePattern(41);
+        await archived.SaveAsPngAsync(Path.Combine(archiveRoot, "readable.png"));
+        var unreadable = Path.Combine(archiveRoot, "unreadable.png");
+        await File.WriteAllBytesAsync(unreadable, [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]);
+        using var image = ImageFixtureFactory.CreatePattern(42);
+        await image.SaveAsPngAsync(Path.Combine(sourceRoot, "unique.png"));
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var decoder = new ImageDecoder();
+        var coordinator = new ScanCoordinator(
+            store,
+            new ArchiveIndexer(store, decoder),
+            decoder,
+            new FileRouter(store, decoder, new FileRouterTests.FakeRecycleBinService()),
+            TimeSpan.Zero);
+
+        var result = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+
+        Assert.Equal(1, result.Examined);
+        Assert.Equal(1, result.MovedUnique);
+        Assert.True(File.Exists(Path.Combine(archiveRoot, "unique.png")));
+        Assert.True(File.Exists(unreadable));
+        Assert.Contains(result.Errors, error => error.Contains(unreadable, StringComparison.Ordinal));
+    }
 }
