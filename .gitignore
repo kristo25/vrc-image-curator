@@ -14,4 +14,5 @@ TestResults/
 # Local build helper and its log.
 /build-and-test.bat
 /build-log.txt
+/push-to-github.bat
 /Claude outputs/
