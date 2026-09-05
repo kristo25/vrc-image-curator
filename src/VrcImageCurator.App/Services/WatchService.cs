@@ -379,7 +379,9 @@ public sealed class WatchService : IDisposable
                         }
                     }
 
-                    Queue(target.Category, target.Archive, path: null);
+                    // The folder was gone and is back, so every change made while it was
+                    // missing was lost. A full sweep is the only honest recovery.
+                    Queue(target.Category, target.Archive, path: null, requestFullScan: true);
                 }
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
                 {
