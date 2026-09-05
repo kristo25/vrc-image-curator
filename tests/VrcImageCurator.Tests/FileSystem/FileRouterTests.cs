@@ -1,3 +1,4 @@
+using System.Text.Json;
 using SixLabors.ImageSharp;
 using VrcImageCurator.Core.FileSystem;
 using VrcImageCurator.Core.Imaging;
@@ -678,5 +679,36 @@ public sealed class FileRouterTests
         public List<T> Values { get; } = [];
 
         public void Report(T value) => Values.Add(value);
+    }
+
+    [Fact]
+    public async Task UniqueMoveUsesThreeDurableStateWrites()
+    {
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        var source = Path.Combine(sourceRoot, "image.png");
+        using var image = ImageFixtureFactory.CreatePattern(29);
+        await image.SaveAsPngAsync(source);
+        var fingerprint = ImageFingerprint.Create(ImageFixtureFactory.ToDecodedImage(image));
+        using var store = CreateStore(directory, sourceRoot, archiveRoot);
+        var router = new FileRouter(store, new ImageDecoder(), new FakeRecycleBinService());
+        var before = ReadRevision(store);
+
+        await router.MoveUniqueAsync(source, VrcImageCategory.Emoji, fingerprint);
+
+        // Intent, side-effect-started, then a single write that applies the mutation and
+        // completes the entry. Each one rewrites the whole state document, so this count is a
+        // cost the app pays per image and is pinned deliberately.
+        Assert.Equal(3, ReadRevision(store) - before);
+        Assert.True(File.Exists(Path.Combine(archiveRoot, "image.png")));
+    }
+
+    private static long ReadRevision(JsonStateStore store)
+    {
+        using var document = JsonDocument.Parse(File.ReadAllBytes(store.StatePath));
+        return document.RootElement.GetProperty("revision").GetInt64();
     }
 }

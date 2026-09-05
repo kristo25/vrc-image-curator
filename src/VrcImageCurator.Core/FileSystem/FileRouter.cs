@@ -514,16 +514,10 @@ public sealed class FileRouter
                         }
 
                         await ApplySideEffectAsync(entry, cancellationToken).ConfigureAwait(false);
-                        await _journal.AdvanceAsync(entry.Id, JournalPhase.SideEffectApplied, cancellationToken: cancellationToken)
-                            .ConfigureAwait(false);
                         await CommitMutationAsync(entry.Id, cancellationToken).ConfigureAwait(false);
-                        await _journal.AdvanceAsync(entry.Id, JournalPhase.Completed, cancellationToken: cancellationToken)
-                            .ConfigureAwait(false);
                         break;
                     case JournalReconciliationAction.CommitState:
                         await CommitMutationAsync(entry.Id, cancellationToken).ConfigureAwait(false);
-                        await _journal.AdvanceAsync(entry.Id, JournalPhase.Completed, cancellationToken: cancellationToken)
-                            .ConfigureAwait(false);
                         break;
                     case JournalReconciliationAction.MarkCompleted:
                         await _journal.AdvanceAsync(entry.Id, JournalPhase.Completed, cancellationToken: cancellationToken)
@@ -594,11 +588,13 @@ public sealed class FileRouter
             .ConfigureAwait(false);
         await VerifyExpectedSourceAsync(entry, cancellationToken).ConfigureAwait(false);
         await ApplySideEffectAsync(entry, cancellationToken).ConfigureAwait(false);
-        await _journal.AdvanceAsync(entry.Id, JournalPhase.SideEffectApplied, cancellationToken: cancellationToken)
-            .ConfigureAwait(false);
+
+        // One durable write applies the mutation and completes the entry. Splitting it into
+        // three cost three full rewrites of the state document per file operation, and the
+        // intermediate phases were only reachable in the window this removes: a crash after the
+        // side effect still leaves SideEffectStarted, which reconciliation resolves correctly
+        // from what is actually on disk.
         await CommitMutationAsync(entry.Id, cancellationToken).ConfigureAwait(false);
-        await _journal.AdvanceAsync(entry.Id, JournalPhase.Completed, cancellationToken: cancellationToken)
-            .ConfigureAwait(false);
         return new FileRouteResult(entry.Id, entry.DestinationPath);
     }
 
@@ -615,11 +611,7 @@ public sealed class FileRouter
             .ConfigureAwait(false);
         await VerifyExpectedSourceAsync(entry, cancellationToken).ConfigureAwait(false);
         await ApplySideEffectAsync(entry, cancellationToken).ConfigureAwait(false);
-        await _journal.AdvanceAsync(entry.Id, JournalPhase.SideEffectApplied, cancellationToken: cancellationToken)
-            .ConfigureAwait(false);
         await CommitMutationAsync(entry.Id, cancellationToken).ConfigureAwait(false);
-        await _journal.AdvanceAsync(entry.Id, JournalPhase.Completed, cancellationToken: cancellationToken)
-            .ConfigureAwait(false);
     }
 
     private async Task ApplySideEffectAsync(JournalEntry entry, CancellationToken cancellationToken)
@@ -663,7 +655,7 @@ public sealed class FileRouter
             {
                 var entry = state.OperationJournal.Single(item => item.Id == operationId);
                 ApplyMutation(state, entry);
-                entry.Phase = JournalPhase.StateCommitted;
+                entry.Phase = JournalPhase.Completed;
                 entry.UpdatedUtc = _timeProvider.GetUtcNow();
                 entry.LastError = null;
                 state.History.Add(CreateActivity(entry));
