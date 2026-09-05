@@ -36,6 +36,8 @@ public sealed class JsonStateStore : IDisposable
     public const string TemporaryFileName = "state.json.tmp";
     public const string BackupFileName = "state.json.bak";
 
+    private const int RevisionProbeBytes = 4096;
+
     private static readonly JsonSerializerOptions SerializerOptions = CreateSerializerOptions();
 
     private readonly Func<AppStateDocument> _defaultStateFactory;
@@ -383,6 +385,11 @@ public sealed class JsonStateStore : IDisposable
         }
     }
 
+    /// <summary>
+    /// Reads just the revision number. "revision" is the second property written, so a small
+    /// prefix is almost always enough; parsing the whole document here meant every write paid a
+    /// second full parse of a file that can be tens of megabytes.
+    /// </summary>
     private async Task<long> ReadCurrentRevisionAsync(CancellationToken cancellationToken)
     {
         if (!File.Exists(StatePath))
@@ -395,14 +402,64 @@ public sealed class JsonStateStore : IDisposable
             FileMode.Open,
             FileAccess.Read,
             FileShare.Read,
-            bufferSize: 4096,
+            bufferSize: RevisionProbeBytes,
             FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+        var probe = new byte[RevisionProbeBytes];
+        var read = await stream
+            .ReadAtLeastAsync(probe, probe.Length, throwOnEndOfStream: false, cancellationToken)
+            .ConfigureAwait(false);
+        if (TryReadRevisionFromPrefix(probe.AsSpan(0, read), out var probed))
+        {
+            return probed;
+        }
+
+        // The prefix did not contain it, so fall back to reading the document properly.
+        stream.Position = 0;
         using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken)
             .ConfigureAwait(false);
 
         return document.RootElement.TryGetProperty("revision", out var revision)
             ? revision.GetInt64()
             : 0;
+    }
+
+    private static bool TryReadRevisionFromPrefix(ReadOnlySpan<byte> prefix, out long revision)
+    {
+        revision = 0;
+        if (prefix.IsEmpty)
+        {
+            return false;
+        }
+
+        try
+        {
+            // isFinalBlock: false so a token cut off by the end of the prefix simply stops the
+            // scan instead of being reported as malformed.
+            var reader = new Utf8JsonReader(prefix, isFinalBlock: false, state: default);
+            var depth = 0;
+            while (reader.Read())
+            {
+                switch (reader.TokenType)
+                {
+                    case JsonTokenType.StartObject:
+                        depth++;
+                        break;
+                    case JsonTokenType.EndObject:
+                        depth--;
+                        break;
+                    case JsonTokenType.PropertyName
+                        when depth == 1 && reader.ValueTextEquals("revision"u8):
+                        return reader.Read() && reader.TryGetInt64(out revision);
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+
+        return false;
     }
 
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);

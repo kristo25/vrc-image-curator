@@ -457,6 +457,11 @@ public sealed class FileRouterTests
         Assert.False(File.Exists(held));
         Assert.True(File.Exists(Path.Combine(archiveRoot, "held.png")));
         Assert.True(File.Exists(archived));
+
+        // The second half failed, so the decision must still be in the queue to retry rather
+        // than silently resolved with the duplicate left behind.
+        var pending = Assert.Single((await store.LoadAsync()).ReviewQueue);
+        Assert.NotEqual(ReviewStatus.Resolved, pending.Status);
     }
 
     [Fact]

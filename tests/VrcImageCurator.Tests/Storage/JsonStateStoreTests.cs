@@ -540,4 +540,44 @@ public sealed class JsonStateStoreTests
                 directory.GetPath("profile"),
                 directory.GetPath("local-app-data"),
                 directory.GetPath("state")));
+
+    [Fact]
+    public async Task RevisionIsReadCorrectlyWhenTheDocumentIsLargerThanTheProbe()
+    {
+        using var directory = new TestDirectory();
+        using var store = new JsonStateStore(
+            directory.GetPath("state"),
+            () => AppStateDefaults.Create(directory.GetPath("profile"), directory.GetPath("local")));
+
+        // Push the document well past the 4 KB prefix the revision probe reads, so a wrong
+        // revision would surface as a stale-revision conflict on the next write.
+        await store.UpdateAsync(state =>
+        {
+            for (var index = 0; index < 400; index++)
+            {
+                state.History.Add(new ActivityEntry
+                {
+                    Id = Guid.NewGuid(),
+                    OccurredUtc = DateTimeOffset.UtcNow,
+                    Kind = ActivityKind.Scan,
+                    Level = ActivityLevel.Information,
+                    Message = new string('x', 200),
+                });
+            }
+
+            return true;
+        });
+
+        Assert.True(new FileInfo(store.StatePath).Length > 8192);
+
+        // Each of these reads the revision, and would throw StateRevisionConflictException if the
+        // probe returned the wrong number.
+        for (var index = 0; index < 3; index++)
+        {
+            await store.UpdateAsync(state => state.Revision);
+        }
+
+        var reloaded = await store.LoadAsync();
+        Assert.True(reloaded.Revision > 3);
+    }
 }

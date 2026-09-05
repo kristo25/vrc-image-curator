@@ -232,19 +232,50 @@ public sealed class FileRouter
             throw new InvalidOperationException("The incoming fingerprint is missing. Run a new scan.");
         }
 
+        // The move deliberately does not resolve the review: this decision has two halves, and
+        // if the second one fails the queue entry has to survive so it can be retried. Resolving
+        // inside the move left the archived duplicate in place with nothing left to act on.
         await MoveUniqueAsync(
                 current.HeldFilePath,
                 current.Category,
                 current.IncomingImageFingerprint,
                 current.RoutingContext,
-                reviewItemId: current.Id,
+                reviewItemId: null,
                 duplicateOverride: true,
                 cancellationToken: cancellationToken)
             .ConfigureAwait(false);
         var finalPreservedPath = await RemoveArchiveCandidateAsync(current, currentCandidate, cancellationToken)
             .ConfigureAwait(false);
+        await ResolveKeepIncomingAsync(current.Id, cancellationToken).ConfigureAwait(false);
         return new KeepIncomingResult(true, finalPreservedPath);
     }
+
+    /// <summary>Closes a Keep incoming decision once both halves of it have committed.</summary>
+    private Task ResolveKeepIncomingAsync(Guid reviewItemId, CancellationToken cancellationToken) =>
+        _stateStore.UpdateAsync(
+            state =>
+            {
+                var review = state.ReviewQueue.SingleOrDefault(item => item.Id == reviewItemId);
+                if (review is null)
+                {
+                    return false;
+                }
+
+                review.Status = ReviewStatus.Resolved;
+                review.HeldFilePath = string.Empty;
+                state.History.Add(new ActivityEntry
+                {
+                    Id = Guid.NewGuid(),
+                    OccurredUtc = _timeProvider.GetUtcNow(),
+                    Kind = ActivityKind.ReviewDecision,
+                    Level = ActivityLevel.Information,
+                    Category = review.Category,
+                    Message = "Kept the incoming image and removed the archived match.",
+                    SourcePath = review.IncomingOriginalPath,
+                });
+                return true;
+            },
+            cancellationToken);
 
     private async Task<string?> RemoveArchiveCandidateAsync(
         ReviewItem reviewItem,
