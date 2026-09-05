@@ -6,3 +6,12 @@ TestResults/
 /publish-v*/
 /artifacts/
 /.live-vrc-test/
+
+# AI handoff notes: useful locally, not part of the product.
+/docs/APP_MEMORY_FOR_CLAUDE.md
+/docs/CLAUDE_ORIENTATION_PROMPT.txt
+
+# Local build helper and its log.
+/build-and-test.bat
+/build-log.txt
+/Claude outputs/
