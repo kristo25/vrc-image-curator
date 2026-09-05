@@ -711,4 +711,31 @@ public sealed class FileRouterTests
         using var document = JsonDocument.Parse(File.ReadAllBytes(store.StatePath));
         return document.RootElement.GetProperty("revision").GetInt64();
     }
+
+    [Fact]
+    public async Task UniqueMoveKeepsTheArchivedRecordsFingerprintAcrossAReload()
+    {
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        var source = Path.Combine(sourceRoot, "image.png");
+        using var image = ImageFixtureFactory.CreatePattern(30);
+        await image.SaveAsPngAsync(source);
+        var fingerprint = ImageFingerprint.Create(ImageFixtureFactory.ToDecodedImage(image));
+        using var store = CreateStore(directory, sourceRoot, archiveRoot);
+        var router = new FileRouter(store, new ImageDecoder(), new FakeRecycleBinService());
+
+        await router.MoveUniqueAsync(source, VrcImageCategory.Emoji, fingerprint);
+
+        // The journal entry is reloaded from disk when the mutation commits, and fingerprints are
+        // no longer persisted on journal entries. If the in-memory one is not carried across, the
+        // archived record lands without a fingerprint and the whole index rebuilds every move.
+        var reloaded = await store.LoadAsync();
+        var record = Assert.Single(reloaded.ArchiveIndex.Categories[0].Images);
+        Assert.NotNull(record.Fingerprint);
+        Assert.Equal(fingerprint.ExactIdentity, record.Fingerprint!.ExactIdentity);
+        Assert.True(record.Fingerprint.HasCurrentFeatures);
+    }
 }

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using VrcImageCurator.Core.FileSystem;
+using VrcImageCurator.Core.Imaging;
 using VrcImageCurator.Core.Models;
 
 namespace VrcImageCurator.Core.Storage;
@@ -35,10 +36,21 @@ public sealed class JsonStateStore : IDisposable
     public const string StateFileName = "state.json";
     public const string TemporaryFileName = "state.json.tmp";
     public const string BackupFileName = "state.json.bak";
+    public const string FingerprintFileName = "fingerprints.json";
+    public const string FingerprintTemporaryFileName = "fingerprints.json.tmp";
 
     private const int RevisionProbeBytes = 4096;
 
     private static readonly JsonSerializerOptions SerializerOptions = CreateSerializerOptions();
+
+    /// <summary>
+    /// Used only to read documents written before fingerprints moved out of the state file.
+    /// Those carry an extra "fingerprint" member per image that the strict options reject.
+    /// </summary>
+    private static readonly JsonSerializerOptions LegacySerializerOptions = CreateSerializerOptions(
+        JsonUnmappedMemberHandling.Skip);
+
+    private HashSet<Guid>? _persistedFingerprintIds;
 
     private readonly Func<AppStateDocument> _defaultStateFactory;
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -52,6 +64,8 @@ public sealed class JsonStateStore : IDisposable
         StatePath = Path.Combine(StateDirectory, StateFileName);
         TemporaryPath = Path.Combine(StateDirectory, TemporaryFileName);
         BackupPath = Path.Combine(StateDirectory, BackupFileName);
+        FingerprintPath = Path.Combine(StateDirectory, FingerprintFileName);
+        FingerprintTemporaryPath = Path.Combine(StateDirectory, FingerprintTemporaryFileName);
         _defaultStateFactory = defaultStateFactory ?? (() => AppStateDefaults.Create());
     }
 
@@ -62,6 +76,10 @@ public sealed class JsonStateStore : IDisposable
     public string TemporaryPath { get; }
 
     public string BackupPath { get; }
+
+    public string FingerprintPath { get; }
+
+    public string FingerprintTemporaryPath { get; }
 
     public StateRecoveryNotice? LastRecoveryNotice { get; private set; }
 
@@ -192,6 +210,9 @@ public sealed class JsonStateStore : IDisposable
             File.Delete(TemporaryPath);
             File.Delete(StatePath);
             File.Delete(BackupPath);
+            File.Delete(FingerprintPath);
+            File.Delete(FingerprintTemporaryPath);
+            _persistedFingerprintIds = null;
             if (Directory.Exists(StateDirectory))
             {
                 foreach (var quarantined in Directory.EnumerateFiles(
@@ -257,18 +278,32 @@ public sealed class JsonStateStore : IDisposable
         CancellationToken cancellationToken,
         bool persistChanges = true)
     {
-        AppStateDocument state;
-        await using (var stream = new FileStream(
-            path,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.Read,
-            bufferSize: 64 * 1024,
-            FileOptions.Asynchronous | FileOptions.SequentialScan))
+        var utf8 = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
+        var legacyFingerprints = TryExtractLegacyFingerprints(utf8);
+
+        // A pre-v5 document carries a fingerprint per image that the strict options reject, so
+        // it is read leniently and the fingerprints are lifted out by hand.
+        var state = JsonSerializer.Deserialize<AppStateDocument>(
+                utf8,
+                legacyFingerprints is null ? SerializerOptions : LegacySerializerOptions)
+            ?? throw new InvalidDataException("The state document is empty.");
+
+        if (legacyFingerprints is not null)
         {
-            state = await JsonSerializer.DeserializeAsync<AppStateDocument>(stream, SerializerOptions, cancellationToken)
-                .ConfigureAwait(false)
-                ?? throw new InvalidDataException("The state document is empty.");
+            foreach (var image in state.ArchiveIndex.Categories.SelectMany(category => category.Images))
+            {
+                if (legacyFingerprints.TryGetValue(image.Id, out var lifted))
+                {
+                    image.Fingerprint = lifted;
+                }
+            }
+
+            // Force the sidecar to be written by the migration save below.
+            _persistedFingerprintIds = null;
+        }
+        else
+        {
+            await AttachFingerprintsAsync(state, cancellationToken).ConfigureAwait(false);
         }
 
         var migrated = AppStateMigrator.Migrate(state, _defaultStateFactory());
@@ -329,6 +364,59 @@ public sealed class JsonStateStore : IDisposable
         return candidate;
     }
 
+    /// <summary>
+    /// Returns the fingerprints embedded in a pre-v5 state document, or null when the document
+    /// is already current and its fingerprints live in the sidecar.
+    /// </summary>
+    private static Dictionary<Guid, ImageFingerprint>? TryExtractLegacyFingerprints(byte[] utf8)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(utf8);
+            if (!document.RootElement.TryGetProperty("schemaVersion", out var version)
+                || version.ValueKind != JsonValueKind.Number
+                || version.GetInt32() >= AppStateDocument.CurrentSchemaVersion)
+            {
+                return null;
+            }
+
+            var lifted = new Dictionary<Guid, ImageFingerprint>();
+            if (!document.RootElement.TryGetProperty("archiveIndex", out var index)
+                || !index.TryGetProperty("categories", out var categories)
+                || categories.ValueKind != JsonValueKind.Array)
+            {
+                return lifted;
+            }
+
+            foreach (var category in categories.EnumerateArray())
+            {
+                if (!category.TryGetProperty("images", out var images)
+                    || images.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                foreach (var image in images.EnumerateArray())
+                {
+                    if (image.TryGetProperty("id", out var id)
+                        && image.TryGetProperty("fingerprint", out var fingerprint)
+                        && fingerprint.ValueKind == JsonValueKind.Object
+                        && fingerprint.Deserialize<ImageFingerprint>(SerializerOptions) is { } parsed)
+                    {
+                        lifted[id.GetGuid()] = parsed;
+                    }
+                }
+            }
+
+            return lifted;
+        }
+        catch (Exception exception) when (exception is JsonException or FormatException)
+        {
+            // Let the strict read report the real problem.
+            return null;
+        }
+    }
+
     private static bool IsUnreadableState(Exception exception) =>
         exception is JsonException or InvalidDataException or ArgumentException or OverflowException;
 
@@ -355,6 +443,19 @@ public sealed class JsonStateStore : IDisposable
 
         try
         {
+            // The sidecar is written first. One that runs ahead of the state document only holds
+            // unused entries; a state document ahead of the sidecar would reference fingerprints
+            // that are not there and force an avoidable rebuild.
+            var fingerprintIds = state.ArchiveIndex.Categories
+                .SelectMany(category => category.Images)
+                .Where(image => image.Fingerprint is not null)
+                .Select(image => image.Id)
+                .ToHashSet();
+            if (_persistedFingerprintIds is null || !_persistedFingerprintIds.SetEquals(fingerprintIds))
+            {
+                await WriteFingerprintsAsync(state, cancellationToken).ConfigureAwait(false);
+            }
+
             await using (var stream = new FileStream(
                 TemporaryPath,
                 FileMode.Create,
@@ -464,16 +565,105 @@ public sealed class JsonStateStore : IDisposable
 
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
 
-    private static JsonSerializerOptions CreateSerializerOptions()
+    private static JsonSerializerOptions CreateSerializerOptions(
+        JsonUnmappedMemberHandling unmappedMembers = JsonUnmappedMemberHandling.Disallow)
     {
         var options = new JsonSerializerOptions
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
             PropertyNameCaseInsensitive = false,
             WriteIndented = false,
-            UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+            UnmappedMemberHandling = unmappedMembers,
         };
         options.Converters.Add(new JsonStringEnumConverter());
         return options;
+    }
+
+    private async Task<Dictionary<Guid, ImageFingerprint>> ReadFingerprintsAsync(
+        CancellationToken cancellationToken)
+    {
+        if (!File.Exists(FingerprintPath))
+        {
+            return [];
+        }
+
+        try
+        {
+            await using var stream = new FileStream(
+                FingerprintPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 64 * 1024,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            return await JsonSerializer
+                .DeserializeAsync<Dictionary<Guid, ImageFingerprint>>(stream, SerializerOptions, cancellationToken)
+                .ConfigureAwait(false) ?? [];
+        }
+        catch (Exception exception) when (IsUnreadableState(exception))
+        {
+            // Fingerprints are derived data. Losing them costs a rebuild, never an image, so an
+            // unreadable sidecar is treated as empty and the affected indexes go stale.
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// Reattaches stored fingerprints. Any index holding a record without one is marked stale:
+    /// a record with no fingerprint is silently skipped when matching, which would show up as
+    /// duplicates being archived instead of queued for review.
+    /// </summary>
+    private async Task AttachFingerprintsAsync(AppStateDocument state, CancellationToken cancellationToken)
+    {
+        var fingerprints = await ReadFingerprintsAsync(cancellationToken).ConfigureAwait(false);
+        _persistedFingerprintIds = [.. fingerprints.Keys];
+
+        foreach (var category in state.ArchiveIndex.Categories)
+        {
+            var incomplete = false;
+            foreach (var image in category.Images)
+            {
+                if (fingerprints.TryGetValue(image.Id, out var fingerprint))
+                {
+                    image.Fingerprint = fingerprint;
+                }
+                else
+                {
+                    incomplete = true;
+                }
+            }
+
+            if (incomplete && category.Status == IndexStatus.Current)
+            {
+                category.Status = IndexStatus.Stale;
+                category.LastError = "Stored image fingerprints are incomplete; the index will be rebuilt.";
+            }
+        }
+    }
+
+    private async Task WriteFingerprintsAsync(AppStateDocument state, CancellationToken cancellationToken)
+    {
+        var fingerprints = state.ArchiveIndex.Categories
+            .SelectMany(category => category.Images)
+            .Where(image => image.Fingerprint is not null)
+            .GroupBy(image => image.Id)
+            .ToDictionary(group => group.Key, group => group.First().Fingerprint!);
+
+        await using (var stream = new FileStream(
+            FingerprintTemporaryPath,
+            FileMode.Create,
+            FileAccess.Write,
+            FileShare.None,
+            bufferSize: 64 * 1024,
+            FileOptions.Asynchronous | FileOptions.WriteThrough))
+        {
+            await JsonSerializer.SerializeAsync(stream, fingerprints, SerializerOptions, cancellationToken)
+                .ConfigureAwait(false);
+            await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            stream.Flush(flushToDisk: true);
+        }
+
+        File.Move(FingerprintTemporaryPath, FingerprintPath, overwrite: true);
+        _persistedFingerprintIds = [.. fingerprints.Keys];
     }
 }

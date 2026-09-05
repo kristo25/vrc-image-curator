@@ -105,7 +105,7 @@ public enum JournalPhase
 
 public sealed class AppStateDocument
 {
-    public const int CurrentSchemaVersion = 4;
+    public const int CurrentSchemaVersion = 5;
 
     public int SchemaVersion { get; set; } = CurrentSchemaVersion;
 
@@ -227,6 +227,13 @@ public sealed class IndexedImageRecord
 
     public string PerceptualFingerprint { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Held in memory only. Perceptual fingerprints are large - roughly 4 KB for a still image
+    /// and 100 KB for an animated GIF - and keeping them inside the state document meant every
+    /// state write rewrote all of them. They live in a sidecar keyed by <see cref="Id"/> and are
+    /// reattached on load; a record whose fingerprint is missing forces an index rebuild.
+    /// </summary>
+    [JsonIgnore]
     public ImageFingerprint? Fingerprint { get; set; }
 }
 
@@ -496,6 +503,14 @@ public static class AppStateMigrator
             return false;
         }
 
+        if (state.SchemaVersion == 4)
+        {
+            // Fingerprints moved out of the state document. The store lifts them into the
+            // sidecar before this runs, so nothing needs rebuilding here.
+            state.SchemaVersion = AppStateDocument.CurrentSchemaVersion;
+            return true;
+        }
+
         if (state.SchemaVersion is 2 or 3)
         {
             foreach (var index in state.ArchiveIndex.Categories)
@@ -513,7 +528,7 @@ public static class AppStateMigrator
         if (state.SchemaVersion != 1)
         {
             throw new InvalidDataException(
-                $"Unsupported state schema version {state.SchemaVersion}; expected 1, 2, 3, or {AppStateDocument.CurrentSchemaVersion}.");
+                $"Unsupported state schema version {state.SchemaVersion}; expected 1 through {AppStateDocument.CurrentSchemaVersion}.");
         }
 
         state.Settings.LegacyArchiveMappings ??= [];

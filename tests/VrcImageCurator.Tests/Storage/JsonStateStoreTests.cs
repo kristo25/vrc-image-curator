@@ -1,5 +1,8 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using VrcImageCurator.Core.Imaging;
+using VrcImageCurator.Tests.Imaging;
 using VrcImageCurator.Core.Models;
 using VrcImageCurator.Core.Storage;
 
@@ -579,5 +582,124 @@ public sealed class JsonStateStoreTests
 
         var reloaded = await store.LoadAsync();
         Assert.True(reloaded.Revision > 3);
+    }
+
+    private static JsonSerializerOptions FixtureOptions()
+    {
+        var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+        options.Converters.Add(new JsonStringEnumConverter());
+        return options;
+    }
+
+    private static (AppStateDocument Seed, ImageFingerprint Fingerprint, Guid RecordId) SeedWithIndexedImage(
+        TestDirectory directory)
+    {
+        using var image = ImageFixtureFactory.CreatePattern(320);
+        var fingerprint = ImageFingerprint.Create(ImageFixtureFactory.ToDecodedImage(image));
+        var recordId = Guid.NewGuid();
+        var seed = AppStateDefaults.Create(directory.GetPath("profile"), directory.GetPath("local"));
+        var category = seed.ArchiveIndex.Categories[0];
+        category.Status = IndexStatus.Current;
+        category.Images.Add(new IndexedImageRecord
+        {
+            Id = recordId,
+            Category = category.Category,
+            Path = directory.GetPath("archive", "one.png"),
+            ExactFingerprint = fingerprint.ExactIdentity,
+            Fingerprint = fingerprint,
+        });
+        return (seed, fingerprint, recordId);
+    }
+
+    [Fact]
+    public async Task FingerprintsEmbeddedByOlderVersionsAreMovedIntoTheSidecar()
+    {
+        using var directory = new TestDirectory();
+        var stateDirectory = directory.GetPath("state");
+        Directory.CreateDirectory(stateDirectory);
+        var (seed, fingerprint, recordId) = SeedWithIndexedImage(directory);
+
+        // Write the document the way version 4 did: schemaVersion 4, fingerprint inline.
+        var options = FixtureOptions();
+        var node = JsonSerializer.SerializeToNode(seed, options)!;
+        node["schemaVersion"] = 4;
+        node["archiveIndex"]!["categories"]![0]!["images"]![0]!["fingerprint"] =
+            JsonSerializer.SerializeToNode(fingerprint, options);
+        await File.WriteAllTextAsync(
+            Path.Combine(stateDirectory, JsonStateStore.StateFileName),
+            node.ToJsonString());
+
+        using var store = new JsonStateStore(
+            stateDirectory,
+            () => AppStateDefaults.Create(directory.GetPath("profile"), directory.GetPath("local")));
+
+        var loaded = await store.LoadAsync();
+
+        // The existing settings and index survive; only where the fingerprint lives changed.
+        Assert.Equal(AppStateDocument.CurrentSchemaVersion, loaded.SchemaVersion);
+        var record = Assert.Single(loaded.ArchiveIndex.Categories[0].Images);
+        Assert.Equal(recordId, record.Id);
+        Assert.NotNull(record.Fingerprint);
+        Assert.Equal(fingerprint.ExactIdentity, record.Fingerprint!.ExactIdentity);
+        Assert.Equal(IndexStatus.Current, loaded.ArchiveIndex.Categories[0].Status);
+
+        Assert.True(File.Exists(store.FingerprintPath));
+        Assert.DoesNotContain(
+            "perceptualFrames",
+            await File.ReadAllTextAsync(store.StatePath),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task StateWritesLeaveTheFingerprintSidecarAloneWhenTheImageSetIsUnchanged()
+    {
+        using var directory = new TestDirectory();
+        var stateDirectory = directory.GetPath("state");
+        var (seed, _, _) = SeedWithIndexedImage(directory);
+        using var store = new JsonStateStore(stateDirectory, () => seed);
+
+        _ = await store.LoadAsync();
+        Assert.True(File.Exists(store.FingerprintPath));
+        var written = File.GetLastWriteTimeUtc(store.FingerprintPath);
+        await Task.Delay(30);
+
+        // Three writes that do not change which images are indexed. This is the shape of a file
+        // operation, and none of them should rewrite the large sidecar.
+        for (var index = 0; index < 3; index++)
+        {
+            await store.UpdateAsync(state =>
+            {
+                state.History.Add(new ActivityEntry
+                {
+                    Id = Guid.NewGuid(),
+                    OccurredUtc = DateTimeOffset.UtcNow,
+                    Kind = ActivityKind.Scan,
+                    Level = ActivityLevel.Information,
+                    Message = "unchanged image set",
+                });
+                return true;
+            });
+        }
+
+        Assert.Equal(written, File.GetLastWriteTimeUtc(store.FingerprintPath));
+    }
+
+    [Fact]
+    public async Task AnIndexedImageWithoutItsFingerprintForcesARebuild()
+    {
+        using var directory = new TestDirectory();
+        var stateDirectory = directory.GetPath("state");
+        var (seed, _, _) = SeedWithIndexedImage(directory);
+        using var store = new JsonStateStore(stateDirectory, () => seed);
+        _ = await store.LoadAsync();
+        Assert.True(File.Exists(store.FingerprintPath));
+
+        File.Delete(store.FingerprintPath);
+        var reloaded = await store.LoadAsync();
+
+        // Without its fingerprint the record would be skipped when matching, which shows up as
+        // duplicates being archived instead of queued. Rebuilding is the safe response.
+        Assert.Equal(IndexStatus.Stale, reloaded.ArchiveIndex.Categories[0].Status);
+        Assert.NotNull(reloaded.ArchiveIndex.Categories[0].LastError);
     }
 }

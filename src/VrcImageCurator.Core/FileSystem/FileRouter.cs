@@ -514,10 +514,10 @@ public sealed class FileRouter
                         }
 
                         await ApplySideEffectAsync(entry, cancellationToken).ConfigureAwait(false);
-                        await CommitMutationAsync(entry.Id, cancellationToken).ConfigureAwait(false);
+                        await CommitMutationAsync(entry, cancellationToken).ConfigureAwait(false);
                         break;
                     case JournalReconciliationAction.CommitState:
-                        await CommitMutationAsync(entry.Id, cancellationToken).ConfigureAwait(false);
+                        await CommitMutationAsync(entry, cancellationToken).ConfigureAwait(false);
                         break;
                     case JournalReconciliationAction.MarkCompleted:
                         await _journal.AdvanceAsync(entry.Id, JournalPhase.Completed, cancellationToken: cancellationToken)
@@ -594,7 +594,7 @@ public sealed class FileRouter
         // intermediate phases were only reachable in the window this removes: a crash after the
         // side effect still leaves SideEffectStarted, which reconciliation resolves correctly
         // from what is actually on disk.
-        await CommitMutationAsync(entry.Id, cancellationToken).ConfigureAwait(false);
+        await CommitMutationAsync(entry, cancellationToken).ConfigureAwait(false);
         return new FileRouteResult(entry.Id, entry.DestinationPath);
     }
 
@@ -611,7 +611,7 @@ public sealed class FileRouter
             .ConfigureAwait(false);
         await VerifyExpectedSourceAsync(entry, cancellationToken).ConfigureAwait(false);
         await ApplySideEffectAsync(entry, cancellationToken).ConfigureAwait(false);
-        await CommitMutationAsync(entry.Id, cancellationToken).ConfigureAwait(false);
+        await CommitMutationAsync(entry, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task ApplySideEffectAsync(JournalEntry entry, CancellationToken cancellationToken)
@@ -649,11 +649,22 @@ public sealed class FileRouter
         }
     }
 
-    private Task CommitMutationAsync(Guid operationId, CancellationToken cancellationToken) =>
+    /// <param name="source">
+    /// The in-memory entry. Fingerprints are not persisted on journal entries, so the one held
+    /// here has to be carried across; without it the archived record would land without its
+    /// fingerprint and force a full index rebuild after every single move.
+    /// </param>
+    private Task CommitMutationAsync(JournalEntry source, CancellationToken cancellationToken) =>
         _stateStore.UpdateAsync(
             state =>
             {
-                var entry = state.OperationJournal.Single(item => item.Id == operationId);
+                var entry = state.OperationJournal.Single(item => item.Id == source.Id);
+                if (entry.IndexedImageAfterCommit is not null
+                    && source.IndexedImageAfterCommit?.Fingerprint is { } carried)
+                {
+                    entry.IndexedImageAfterCommit.Fingerprint = carried;
+                }
+
                 ApplyMutation(state, entry);
                 entry.Phase = JournalPhase.Completed;
                 entry.UpdatedUtc = _timeProvider.GetUtcNow();
