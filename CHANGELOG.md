@@ -3,7 +3,7 @@
 All notable changes to VRC Image Curator are recorded here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.3.0] - unreleased
+## [1.3.0] - 2026-09-05
 
 ### Added
 
@@ -38,6 +38,13 @@ All notable changes to VRC Image Curator are recorded here. This project follows
 - *Keep match* no longer asks for confirmation.
 - Activity history shows local time instead of UTC.
 - A review action re-verifies only the candidate it will touch rather than every candidate.
+- **State format.** Perceptual fingerprints have moved out of `state.json` into a
+  `fingerprints.json` sidecar that is rewritten only when a fingerprint actually changes, so a
+  routine file operation no longer rewrites megabytes of derived data. The state document is
+  upgraded to schema 5 the first time 1.3.0 runs. **The upgrade is one way**: keep a copy of
+  `%LOCALAPPDATA%\VrcImageCurator\state.json` if you may want to return to 1.2.0.
+- Reading the current state revision no longer parses the whole document, and a completed move
+  records three state writes instead of five.
 
 ### Fixed
 
@@ -56,14 +63,16 @@ All notable changes to VRC Image Curator are recorded here. This project follows
 - List rows use the application's own colours instead of the Windows theme's chrome, which could
   paint a light background behind the Matches panel in any theme.
 - Progress bar layout no longer shifts with the length of the current file name.
+- `Keep incoming` no longer resolves the review before recycling the archived match. If that
+  second step fails, the review stays in the queue so the decision can be retried.
 
 ### Known limitations
 
-- Application state is a single JSON document that is rewritten on every file operation, and it
-  stores a perceptual fingerprint per archived image. Archives with many thousands of images will
-  see this become the dominant cost of a scan.
-- `Keep incoming` resolves the review before recycling the archived match. If that second step
-  fails, the duplicate remains with no queue entry to retry from.
+- Application state is a single JSON document that is rewritten on every file operation. Moving
+  fingerprints into a sidecar removed the bulk of that cost, but the remaining document still
+  grows with the archive, so a very large archive will still see state writes dominate a scan.
+- The archive index and its fingerprints are re-read from disk for each scan rather than held in
+  memory between scans.
 - The published executable is not code-signed, so Windows SmartScreen warns on first run.
 
 ## [1.2.0]

@@ -68,7 +68,13 @@ The app suggests category folders beneath that root. Source paths remain editabl
 
 ## Portable installation and removal
 
-No installer is required. Keep the executable anywhere you can write and run it.
+Download `VrcImageCurator.exe` from the [latest release](../../releases/latest). No installer is
+required; keep the executable anywhere you can write and run it. Each release also carries a
+`VrcImageCurator.exe.sha256` file, so you can confirm the download matches what the build produced:
+
+```powershell
+Get-FileHash VrcImageCurator.exe -Algorithm SHA256
+```
 
 The executable is not code-signed, so Windows SmartScreen shows *"Windows protected your PC"* the
 first time you run a downloaded copy. Choose **More info > Run anyway** if you trust the source.
