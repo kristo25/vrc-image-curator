@@ -98,6 +98,8 @@ public sealed class JsonStateStoreTests
         var timestamp = new DateTimeOffset(2026, 9, 2, 12, 34, 56, TimeSpan.Zero);
         var imageId = Guid.NewGuid();
         var operationId = Guid.NewGuid();
+        using var sample = ImageFixtureFactory.CreatePattern(seed: 7);
+        var fingerprint = ImageFingerprint.Create(ImageFixtureFactory.ToDecodedImage(sample));
 
         state.Settings.CategoryMappings[0].SourcePath = @"C:\Incoming\Emoji";
         state.Settings.CategoryMappings[0].ArchivePath = @"D:\Archive\Emoji";
@@ -124,6 +126,7 @@ public sealed class JsonStateStoreTests
             Height = 256,
             ExactFingerprint = "exact",
             PerceptualFingerprint = "perceptual",
+            Fingerprint = fingerprint,
         });
 
         state.ReviewQueue.Add(new ReviewItem

@@ -50,7 +50,7 @@ public sealed class JsonStateStore : IDisposable
     private static readonly JsonSerializerOptions LegacySerializerOptions = CreateSerializerOptions(
         JsonUnmappedMemberHandling.Skip);
 
-    private HashSet<Guid>? _persistedFingerprintIds;
+    private Dictionary<Guid, ImageFingerprint>? _persistedFingerprints;
 
     private readonly Func<AppStateDocument> _defaultStateFactory;
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -212,7 +212,7 @@ public sealed class JsonStateStore : IDisposable
             File.Delete(BackupPath);
             File.Delete(FingerprintPath);
             File.Delete(FingerprintTemporaryPath);
-            _persistedFingerprintIds = null;
+            _persistedFingerprints = null;
             if (Directory.Exists(StateDirectory))
             {
                 foreach (var quarantined in Directory.EnumerateFiles(
@@ -299,7 +299,7 @@ public sealed class JsonStateStore : IDisposable
             }
 
             // Force the sidecar to be written by the migration save below.
-            _persistedFingerprintIds = null;
+            _persistedFingerprints = null;
         }
         else
         {
@@ -446,12 +446,7 @@ public sealed class JsonStateStore : IDisposable
             // The sidecar is written first. One that runs ahead of the state document only holds
             // unused entries; a state document ahead of the sidecar would reference fingerprints
             // that are not there and force an avoidable rebuild.
-            var fingerprintIds = state.ArchiveIndex.Categories
-                .SelectMany(category => category.Images)
-                .Where(image => image.Fingerprint is not null)
-                .Select(image => image.Id)
-                .ToHashSet();
-            if (_persistedFingerprintIds is null || !_persistedFingerprintIds.SetEquals(fingerprintIds))
+            if (!FingerprintsMatchSidecar(state))
             {
                 await WriteFingerprintsAsync(state, cancellationToken).ConfigureAwait(false);
             }
@@ -616,7 +611,7 @@ public sealed class JsonStateStore : IDisposable
     private async Task AttachFingerprintsAsync(AppStateDocument state, CancellationToken cancellationToken)
     {
         var fingerprints = await ReadFingerprintsAsync(cancellationToken).ConfigureAwait(false);
-        _persistedFingerprintIds = [.. fingerprints.Keys];
+        _persistedFingerprints = fingerprints;
 
         foreach (var category in state.ArchiveIndex.Categories)
         {
@@ -664,6 +659,42 @@ public sealed class JsonStateStore : IDisposable
         }
 
         File.Move(FingerprintTemporaryPath, FingerprintPath, overwrite: true);
-        _persistedFingerprintIds = [.. fingerprints.Keys];
+        _persistedFingerprints = fingerprints;
+    }
+
+    /// <summary>
+    /// Compares the fingerprints held by the state document against the ones last read from or
+    /// written to the sidecar. The comparison is by reference: a fingerprint that was re-derived
+    /// is always a new instance, so a record whose file changed under the same identifier is
+    /// still detected. Comparing identifiers alone would miss it and strand the stale fingerprint
+    /// on disk.
+    /// </summary>
+    private bool FingerprintsMatchSidecar(AppStateDocument state)
+    {
+        if (_persistedFingerprints is null)
+        {
+            return false;
+        }
+
+        var seen = 0;
+        foreach (var image in state.ArchiveIndex.Categories.SelectMany(category => category.Images))
+        {
+            if (image.Fingerprint is not { } fingerprint)
+            {
+                continue;
+            }
+
+            if (!_persistedFingerprints.TryGetValue(image.Id, out var persisted)
+                || !ReferenceEquals(persisted, fingerprint))
+            {
+                return false;
+            }
+
+            seen++;
+        }
+
+        // A sidecar holding entries the index no longer references is rewritten so the orphans
+        // are pruned rather than reloaded forever.
+        return seen == _persistedFingerprints.Count;
     }
 }
