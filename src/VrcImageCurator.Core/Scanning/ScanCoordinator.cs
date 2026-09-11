@@ -31,6 +31,22 @@ public sealed record ScanProcessingProgress(
 
 public sealed class ScanCoordinator
 {
+    /// <summary>
+    /// How many images may be read and fingerprinted at once. Reading is pure - it touches no
+    /// state and no file is moved - so it is the only part of a scan that can safely run ahead.
+    /// Every decision still happens one image at a time, in path order.
+    /// </summary>
+    public const int MaximumConcurrentReads = 5;
+
+    /// <summary>
+    /// An encoded size above which an image is read on its own. A decoded image is allowed to
+    /// reach <see cref="ImageResourceLimits.MaximumDecodedBytes"/>, so reading several large ones
+    /// together could multiply that; large files are rare enough that serialising them is free.
+    /// </summary>
+    private const long LargeEncodedBytes = 16L * 1024 * 1024;
+
+    private sealed record PreparedImage(ImageFingerprint? Fingerprint, string? Error);
+
     private readonly JsonStateStore _stateStore;
     private readonly ArchiveIndexer _indexer;
     private readonly ImageDecoder _decoder;
@@ -283,7 +299,42 @@ public sealed class ScanCoordinator
         }
     }
 
+    /// <summary>
+    /// Holds fingerprint sidecar writes for the length of the scan. Every archived image adds one
+    /// fingerprint and rewrites all of them, so a scan of an already large archive spends most of
+    /// its time writing the same data over and over. Holding turns that into one write.
+    /// </summary>
     private async Task<CategoryScanResult> ScanCategoryCoreAsync(
+        VrcImageCategory category,
+        string sourceRoot,
+        bool requireEnabled,
+        SourceSnapshot? sourceSnapshot,
+        Action<string, string?>? onImageScanned,
+        Action<string, string?>? onImageProcessed,
+        CancellationToken cancellationToken)
+    {
+        await _stateStore.HoldFingerprintWritesAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await ScanCategoryUnheldAsync(
+                    category,
+                    sourceRoot,
+                    requireEnabled,
+                    sourceSnapshot,
+                    onImageScanned,
+                    onImageProcessed,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            // Not cancellable: a stopped scan still archived files, and their fingerprints belong
+            // on disk so the next scan does not rebuild the whole index.
+            await _stateStore.ReleaseFingerprintWritesAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<CategoryScanResult> ScanCategoryUnheldAsync(
         VrcImageCategory category,
         string sourceRoot,
         bool requireEnabled,
@@ -367,6 +418,37 @@ public sealed class ScanCoordinator
             .Select(item => item.IncomingOriginalPath)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+        // Rebuilding the candidate list and the key lookup for every incoming image costs a pass
+        // over the whole archive each time. The generation moves whenever an image is added to or
+        // removed from the index, so keying on it rebuilds exactly when the archive changed - and
+        // that includes an image archived earlier in this same scan.
+        var candidateGeneration = -1L;
+        var candidates = Array.Empty<ImageCandidate>();
+        var indexedByKey = new Dictionary<string, IndexedImageRecord>(StringComparer.Ordinal);
+
+        // Reading runs ahead of routing by up to MaximumConcurrentReads images. Reads produce a
+        // fingerprint and nothing else, so running them early cannot change what any decision
+        // sees; the loop below still consumes them strictly in path order.
+        var readAhead = Math.Clamp(Environment.ProcessorCount, 1, MaximumConcurrentReads);
+        var readSlots = new SemaphoreSlim(readAhead, readAhead);
+        var largeReadSlot = new SemaphoreSlim(1, 1);
+        var inFlight = new Dictionary<string, Task<PreparedImage>>(StringComparer.OrdinalIgnoreCase);
+        var nextToRead = 0;
+
+        void StartReadsAhead()
+        {
+            while (inFlight.Count < readAhead && nextToRead < paths.Count)
+            {
+                var upcoming = paths[nextToRead++];
+                if (queuedPaths.Contains(upcoming) || !settledPaths.Contains(upcoming))
+                {
+                    continue;
+                }
+
+                inFlight[upcoming] = PrepareImageAsync(upcoming, readSlots, largeReadSlot, cancellationToken);
+            }
+        }
+
         foreach (var path in paths)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -390,17 +472,24 @@ public sealed class ScanCoordinator
                     continue;
                 }
 
-                var decoded = await _decoder.DecodeAsync(path, cancellationToken).ConfigureAwait(false);
+                StartReadsAhead();
+                if (!inFlight.Remove(path, out var read))
+                {
+                    read = PrepareImageAsync(path, readSlots, largeReadSlot, cancellationToken);
+                }
+
+                var prepared = await read.ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
                 onImageScanned?.Invoke("Reading", fileName);
                 readingReported = true;
-                if (!decoded.IsSuccess)
+                if (prepared.Fingerprint is null)
                 {
-                    errors.Add($"{path}: {decoded.Failure!.Message}");
+                    errors.Add($"{path}: {prepared.Error}");
                     outcome = "Could not be read";
                     continue;
                 }
 
-                var fingerprint = ImageFingerprint.Create(decoded.Image!);
+                var fingerprint = prepared.Fingerprint;
                 var relativeDirectory = Path.GetRelativePath(
                     sourceRoot,
                     Path.GetDirectoryName(path) ?? sourceRoot);
@@ -419,10 +508,19 @@ public sealed class ScanCoordinator
                     continue;
                 }
 
-                var candidates = index.Images
-                    .Where(item => item.Fingerprint is not null)
-                    .Select(item => new ImageCandidate(item.Id.ToString("N"), item.Fingerprint!))
-                    .ToArray();
+                if (candidateGeneration != index.Generation)
+                {
+                    candidates = index.Images
+                        .Where(item => item.Fingerprint is not null)
+                        .Select(item => new ImageCandidate(item.Id.ToString("N"), item.Fingerprint!))
+                        .ToArray();
+                    indexedByKey = index.Images.ToDictionary(
+                        item => item.Id.ToString("N"),
+                        item => item,
+                        StringComparer.Ordinal);
+                    candidateGeneration = index.Generation;
+                }
+
                 var matches = ImageMatcher.RankCandidates(
                     fingerprint,
                     candidates,
@@ -436,8 +534,7 @@ public sealed class ScanCoordinator
                     IndexedImageRecord? duplicate = null;
                     foreach (var match in matches)
                     {
-                        var indexed = index.Images.Single(
-                            item => item.Id.ToString("N") == match.CandidateKey);
+                        var indexed = indexedByKey[match.CandidateKey];
                         if (indexed.Fingerprint is not null
                             && ImageMatcher.IsSamePicture(match, fingerprint, indexed.Fingerprint))
                         {
@@ -490,8 +587,7 @@ public sealed class ScanCoordinator
                         Candidates = matches.Select(
                                 match =>
                                 {
-                                    var indexed = index.Images.Single(
-                                        item => item.Id.ToString("N") == match.CandidateKey);
+                                    var indexed = indexedByKey[match.CandidateKey];
                                     return new ReviewCandidate
                                     {
                                         Id = Guid.NewGuid(),
@@ -674,6 +770,73 @@ public sealed class ScanCoordinator
     private sealed record SourceSnapshot(IReadOnlyList<string> Paths, int UnsupportedFiles, string? Error)
     {
         public static SourceSnapshot Empty { get; } = new([], 0, null);
+    }
+
+    /// <summary>
+    /// Reads one image and reduces it to a fingerprint. The decoded pixels are dropped as soon as
+    /// the fingerprint exists, so only the images actively being read hold real memory. Nothing
+    /// here throws: a failure becomes an error on the result so a prefetched read that is never
+    /// consumed cannot surface as an unobserved exception.
+    /// </summary>
+    private async Task<PreparedImage> PrepareImageAsync(
+        string path,
+        SemaphoreSlim readSlots,
+        SemaphoreSlim largeReadSlot,
+        CancellationToken cancellationToken)
+    {
+        var isLarge = false;
+        try
+        {
+            isLarge = new FileInfo(path).Length > LargeEncodedBytes;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // The read below reports the failure properly.
+        }
+
+        try
+        {
+            if (isLarge)
+            {
+                await largeReadSlot.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            try
+            {
+                await readSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    var decoded = await _decoder.DecodeAsync(path, cancellationToken).ConfigureAwait(false);
+                    return decoded.IsSuccess
+                        ? new PreparedImage(ImageFingerprint.Create(decoded.Image!), null)
+                        : new PreparedImage(null, decoded.Failure!.Message);
+                }
+                finally
+                {
+                    readSlots.Release();
+                }
+            }
+            finally
+            {
+                if (isLarge)
+                {
+                    largeReadSlot.Release();
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            return new PreparedImage(null, "the scan was stopped before this image was read.");
+        }
+        catch (Exception exception) when (
+            exception is IOException
+                or UnauthorizedAccessException
+                or InvalidDataException
+                or NotSupportedException
+                or InvalidOperationException)
+        {
+            return new PreparedImage(null, exception.Message);
+        }
     }
 
     private async Task<HashSet<string>> FindSettledPathsAsync(

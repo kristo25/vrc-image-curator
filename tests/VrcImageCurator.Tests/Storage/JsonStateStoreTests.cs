@@ -89,6 +89,68 @@ public sealed class JsonStateStoreTests
         Assert.False(Directory.Exists(state.Settings.HoldingRootPath));
     }
 
+    /// <summary>
+    /// Archiving one image adds one fingerprint but rewrites every other one with it, so a scan
+    /// pays the whole sidecar per file. A caller working through many files holds the writes and
+    /// pays once; nothing may be lost when the hold is released.
+    /// </summary>
+    [Fact]
+    public async Task FingerprintWritesHeldForABatchReachDiskOnRelease()
+    {
+        using var directory = new TestDirectory();
+        using var store = CreateStore(directory);
+        var state = await store.LoadAsync();
+        var category = state.ArchiveIndex.Categories[0];
+        category.Status = IndexStatus.Current;
+
+        static IndexedImageRecord Record(
+            VrcImageCategory imageCategory,
+            string path,
+            ImageFingerprint fingerprint) =>
+            new()
+            {
+                Id = Guid.NewGuid(),
+                Category = imageCategory,
+                Path = path,
+                FileSize = 1,
+                LastWriteUtc = DateTimeOffset.UnixEpoch,
+                Width = fingerprint.Width,
+                Height = fingerprint.Height,
+                ExactFingerprint = fingerprint.ExactIdentity,
+                PerceptualFingerprint = fingerprint.PerceptualFrames[0].DifferenceHash,
+                Fingerprint = fingerprint,
+            };
+
+        using var first = ImageFixtureFactory.CreatePattern(seed: 11);
+        category.Images.Add(Record(
+            category.Category,
+            @"D:\Archive\first.png",
+            ImageFingerprint.Create(ImageFixtureFactory.ToDecodedImage(first))));
+        await store.SaveAsync(state);
+        var afterFirstWrite = await File.ReadAllTextAsync(store.FingerprintPath);
+
+        await store.HoldFingerprintWritesAsync();
+        using var second = ImageFixtureFactory.CreatePattern(seed: 12);
+        category.Images.Add(Record(
+            category.Category,
+            @"D:\Archive\second.png",
+            ImageFingerprint.Create(ImageFixtureFactory.ToDecodedImage(second))));
+        await store.SaveAsync(state);
+
+        // The state document now references a fingerprint the sidecar does not carry yet.
+        Assert.Equal(afterFirstWrite, await File.ReadAllTextAsync(store.FingerprintPath));
+
+        await store.ReleaseFingerprintWritesAsync();
+
+        Assert.NotEqual(afterFirstWrite, await File.ReadAllTextAsync(store.FingerprintPath));
+        var reloaded = await store.LoadAsync();
+        var reloadedCategory = reloaded.ArchiveIndex.Categories[0];
+        Assert.Equal(2, reloadedCategory.Images.Count);
+        Assert.All(reloadedCategory.Images, image => Assert.NotNull(image.Fingerprint));
+        Assert.Equal(IndexStatus.Current, reloadedCategory.Status);
+        Assert.Null(reloadedCategory.LastError);
+    }
+
     [Fact]
     public async Task SaveThenLoadPreservesTheCompleteStateDocument()
     {

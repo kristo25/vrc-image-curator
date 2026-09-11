@@ -357,8 +357,12 @@ public sealed class ScanCoordinatorTests
         Assert.True(File.Exists(Path.Combine(manualSource, "added-after-count.png")));
     }
 
+    /// <summary>
+    /// Reading runs ahead of routing, so the next image may already have been read by this point.
+    /// What must not change is that images are routed one at a time in path order.
+    /// </summary>
     [Fact]
-    public async Task RoutesEachImageBeforeReadingTheNextImage()
+    public async Task RoutesEachImageBeforeReportingTheNextRead()
     {
         using var directory = new TestDirectory();
         var configuredSource = directory.GetPath("configured");
@@ -401,6 +405,46 @@ public sealed class ScanCoordinatorTests
 
         Assert.True(firstRoutedBeforeSecondReadCompleted);
         Assert.Equal(2, result.MovedUnique);
+    }
+
+    [Fact]
+    public async Task DuplicateBeyondTheReadAheadWindowStillMatchesTheEarlierUnique()
+    {
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+
+        // Six files: the last one repeats the first. Reads run ahead by up to five images, so the
+        // copy is read before the original has been archived. The decision for it still has to be
+        // made against the archive as it stands when its turn comes.
+        using var original = ImageFixtureFactory.CreatePattern(120);
+        await original.SaveAsPngAsync(Path.Combine(sourceRoot, "01-original.png"));
+        for (var index = 2; index <= 5; index++)
+        {
+            using var other = ImageFixtureFactory.CreatePattern(120 + index);
+            await other.SaveAsPngAsync(Path.Combine(sourceRoot, $"0{index}-other.png"));
+        }
+
+        await original.SaveAsPngAsync(Path.Combine(sourceRoot, "06-copy.png"));
+
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var decoder = new ImageDecoder();
+        var coordinator = new ScanCoordinator(
+            store,
+            new ArchiveIndexer(store, decoder),
+            decoder,
+            new FileRouter(store, decoder, new FileRouterTests.FakeRecycleBinService()));
+
+        var result = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+
+        Assert.Equal(5, result.MovedUnique);
+        Assert.Equal(1, result.AutoKeptArchived);
+        Assert.Equal(0, result.HeldForReview);
+        Assert.False(File.Exists(Path.Combine(sourceRoot, "06-copy.png")));
+        Assert.True(File.Exists(Path.Combine(archiveRoot, "01-original.png")));
+        Assert.Empty((await store.LoadAsync()).ReviewQueue);
     }
 
     [Fact]

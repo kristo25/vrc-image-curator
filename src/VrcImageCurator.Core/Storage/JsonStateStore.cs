@@ -52,6 +52,33 @@ public sealed class JsonStateStore : IDisposable
 
     private Dictionary<Guid, ImageFingerprint>? _persistedFingerprints;
 
+    /// <summary>
+    /// Size and timestamp of the sidecar the cache in <see cref="_persistedFingerprints"/> was
+    /// read from. The sidecar is the largest thing this store touches - roughly 11 KB per still
+    /// image and 90 KB per animation - and a scan used to re-read all of it several times per
+    /// incoming image. Nothing else writes the file, so matching both values means the cache is
+    /// still the file.
+    /// </summary>
+    private (long Length, DateTime WriteUtc)? _fingerprintStamp;
+
+    /// <summary>
+    /// Fingerprints that belong on disk but have not been written yet, because a caller asked for
+    /// writes to be held. They are derived data: losing them to a crash costs an index rebuild,
+    /// never an image, which is the same outcome as a sidecar that was never written.
+    /// </summary>
+    private Dictionary<Guid, ImageFingerprint>? _deferredFingerprints;
+
+    private int _fingerprintHolds;
+
+    private int _deferredFingerprintWrites;
+
+    /// <summary>
+    /// An upper bound on how much a crash while writes are held can cost. A record whose
+    /// fingerprint is missing is not reused by the indexer, so the cost is re-reading the images
+    /// archived since the last write - not the whole archive - and this caps how many that is.
+    /// </summary>
+    private const int MaximumDeferredFingerprintWrites = 64;
+
     private readonly Func<AppStateDocument> _defaultStateFactory;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private bool _disposed;
@@ -213,6 +240,9 @@ public sealed class JsonStateStore : IDisposable
             File.Delete(FingerprintPath);
             File.Delete(FingerprintTemporaryPath);
             _persistedFingerprints = null;
+            _fingerprintStamp = null;
+            _deferredFingerprints = null;
+            _deferredFingerprintWrites = 0;
             if (Directory.Exists(StateDirectory))
             {
                 foreach (var quarantined in Directory.EnumerateFiles(
@@ -300,6 +330,7 @@ public sealed class JsonStateStore : IDisposable
 
             // Force the sidecar to be written by the migration save below.
             _persistedFingerprints = null;
+            _fingerprintStamp = null;
         }
         else
         {
@@ -445,7 +476,8 @@ public sealed class JsonStateStore : IDisposable
         {
             // The sidecar is written first. One that runs ahead of the state document only holds
             // unused entries; a state document ahead of the sidecar would reference fingerprints
-            // that are not there and force an avoidable rebuild.
+            // that are not there and force an avoidable rebuild. While writes are held that is
+            // exactly the trade being made, bounded by MaximumDeferredFingerprintWrites.
             if (!FingerprintsMatchSidecar(state))
             {
                 await WriteFingerprintsAsync(state, cancellationToken).ConfigureAwait(false);
@@ -577,9 +609,17 @@ public sealed class JsonStateStore : IDisposable
     private async Task<Dictionary<Guid, ImageFingerprint>> ReadFingerprintsAsync(
         CancellationToken cancellationToken)
     {
-        if (!File.Exists(FingerprintPath))
+        var info = new FileInfo(FingerprintPath);
+        if (!info.Exists)
         {
+            _fingerprintStamp = null;
             return [];
+        }
+
+        var stamp = (info.Length, info.LastWriteTimeUtc);
+        if (_persistedFingerprints is not null && _fingerprintStamp == stamp)
+        {
+            return _persistedFingerprints;
         }
 
         try
@@ -591,14 +631,17 @@ public sealed class JsonStateStore : IDisposable
                 FileShare.Read,
                 bufferSize: 64 * 1024,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
-            return await JsonSerializer
+            var read = await JsonSerializer
                 .DeserializeAsync<Dictionary<Guid, ImageFingerprint>>(stream, SerializerOptions, cancellationToken)
                 .ConfigureAwait(false) ?? [];
+            _fingerprintStamp = stamp;
+            return read;
         }
         catch (Exception exception) when (IsUnreadableState(exception))
         {
             // Fingerprints are derived data. Losing them costs a rebuild, never an image, so an
             // unreadable sidecar is treated as empty and the affected indexes go stale.
+            _fingerprintStamp = null;
             return [];
         }
     }
@@ -644,6 +687,25 @@ public sealed class JsonStateStore : IDisposable
             .GroupBy(image => image.Id)
             .ToDictionary(group => group.Key, group => group.First().Fingerprint!);
 
+        // Archiving one image adds one fingerprint but rewrites every other one with it. During a
+        // scan that cost lands on each file in turn, so a caller working through many files can
+        // hold the writes and pay it once instead.
+        if (_fingerprintHolds > 0 && _deferredFingerprintWrites < MaximumDeferredFingerprintWrites)
+        {
+            _persistedFingerprints = fingerprints;
+            _deferredFingerprints = fingerprints;
+            _deferredFingerprintWrites++;
+            return;
+        }
+
+        await FlushFingerprintsCoreAsync(fingerprints, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task FlushFingerprintsCoreAsync(
+        Dictionary<Guid, ImageFingerprint> fingerprints,
+        CancellationToken cancellationToken)
+    {
+        Directory.CreateDirectory(StateDirectory);
         await using (var stream = new FileStream(
             FingerprintTemporaryPath,
             FileMode.Create,
@@ -660,6 +722,60 @@ public sealed class JsonStateStore : IDisposable
 
         File.Move(FingerprintTemporaryPath, FingerprintPath, overwrite: true);
         _persistedFingerprints = fingerprints;
+        _deferredFingerprints = null;
+        _deferredFingerprintWrites = 0;
+        var written = new FileInfo(FingerprintPath);
+        _fingerprintStamp = written.Exists ? (written.Length, written.LastWriteTimeUtc) : null;
+    }
+
+    /// <summary>
+    /// Holds sidecar writes until the matching <see cref="ReleaseFingerprintWritesAsync"/>. State
+    /// documents are still written normally; only the derived fingerprints are held back, and a
+    /// crash while they are held costs an index rebuild rather than an image.
+    /// </summary>
+    public async Task HoldFingerprintWritesAsync(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            _fingerprintHolds++;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Releases one hold and writes any fingerprints that accumulated while writes were held.
+    /// Always call this from a finally block: fingerprints left unwritten are rebuilt rather than
+    /// lost, but rebuilding a large archive is slow.
+    /// </summary>
+    public async Task ReleaseFingerprintWritesAsync(CancellationToken cancellationToken = default)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        await _gate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            if (_fingerprintHolds > 0)
+            {
+                _fingerprintHolds--;
+            }
+
+            if (_fingerprintHolds == 0 && _deferredFingerprints is { } pending)
+            {
+                await FlushFingerprintsCoreAsync(pending, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
     }
 
     /// <summary>
