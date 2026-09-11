@@ -43,7 +43,10 @@ public sealed class AtlasGifExporterTests
         Assert.Equal(128, gif.Width);
         Assert.Equal(128, gif.Height);
         Assert.Equal(0, (int)gif.Metadata.GetGifMetadata().RepeatCount);
-        Assert.All(gif.Frames, frame => Assert.Equal(10, frame.Metadata.GetGifMetadata().FrameDelay));
+        foreach (var frame in gif.Frames)
+        {
+            Assert.Equal(10, frame.Metadata.GetGifMetadata().FrameDelay);
+        }
     }
 
     [Fact]
