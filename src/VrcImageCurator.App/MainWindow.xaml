@@ -237,11 +237,11 @@
                                 <TextBox x:Name="SheetRate" Width="64" Margin="0,0,16,0" LostFocus="SheetOverrideChanged"
                                          automation:AutomationProperties.Name="Frames per second" />
                                 <TextBlock Text="Loop" VerticalAlignment="Center" Margin="0,0,6,0" />
-                                <ComboBox x:Name="SheetLoop" Width="130" Margin="0,0,16,0" Foreground="#111216"
+                                <ComboBox x:Name="SheetLoop" Width="130" Margin="0,0,16,0"
                                           SelectionChanged="SheetOverrideSelected"
                                           automation:AutomationProperties.Name="Loop direction">
-                                    <ComboBoxItem Content="Linear" Foreground="#111216" />
-                                    <ComboBoxItem Content="Ping-pong" Foreground="#111216" />
+                                    <ComboBoxItem Content="Linear" />
+                                    <ComboBoxItem Content="Ping-pong" />
                                 </ComboBox>
                                 <Button x:Name="SkipSheetButton" Padding="9,5" Margin="0,0,8,0" Content="Skip" IsEnabled="False"
                                         Click="SkipSelectedAnimation" automation:AutomationProperties.Name="Skip this emoji" />
@@ -371,13 +371,7 @@
                             <TextBlock FontWeight="SemiBold" Text="Similarity" />
                             <TextBlock FontSize="12" Foreground="{StaticResource MutedTextBrush}" Text="Conservative is recommended." />
                         </StackPanel>
-                        <ComboBox x:Name="SimilarityCombo" Grid.Column="1" SelectionChanged="SettingsSelectionChanged">
-                            <ComboBox.Resources>
-                                <Style TargetType="TextBlock">
-                                    <Setter Property="Foreground" Value="#111216" />
-                                </Style>
-                            </ComboBox.Resources>
-                        </ComboBox>
+                        <ComboBox x:Name="SimilarityCombo" Grid.Column="1" SelectionChanged="SettingsSelectionChanged" />
                     </Grid>
 
                     <Grid Margin="0,0,0,20">
@@ -388,13 +382,7 @@
                                        Text="Where an image is filed under its category folder. Existing files are not moved." />
                         </StackPanel>
                         <ComboBox x:Name="OrganizationCombo" Grid.Column="1" VerticalAlignment="Top" SelectionChanged="SettingsSelectionChanged"
-                                  automation:AutomationProperties.Name="Where archived images are filed">
-                            <ComboBox.Resources>
-                                <Style TargetType="TextBlock">
-                                    <Setter Property="Foreground" Value="#111216" />
-                                </Style>
-                            </ComboBox.Resources>
-                        </ComboBox>
+                                  automation:AutomationProperties.Name="Where archived images are filed" />
                     </Grid>
 
                     <Grid Margin="0,0,0,14">
@@ -403,13 +391,7 @@
                             <TextBlock FontWeight="SemiBold" Text="While watching" />
                             <TextBlock FontSize="12" Foreground="{StaticResource MutedTextBrush}" Text="OnDetection analyzes each image as it arrives. OnInterval ignores individual arrivals and sweeps on a timer." />
                         </StackPanel>
-                        <ComboBox x:Name="WatchModeCombo" Grid.Column="1" VerticalAlignment="Top" SelectionChanged="SettingsSelectionChanged" automation:AutomationProperties.Name="When watching analyzes images">
-                            <ComboBox.Resources>
-                                <Style TargetType="TextBlock">
-                                    <Setter Property="Foreground" Value="#111216" />
-                                </Style>
-                            </ComboBox.Resources>
-                        </ComboBox>
+                        <ComboBox x:Name="WatchModeCombo" Grid.Column="1" VerticalAlignment="Top" SelectionChanged="SettingsSelectionChanged" automation:AutomationProperties.Name="When watching analyzes images" />
                     </Grid>
 
                     <Grid Margin="0,0,0,20">
