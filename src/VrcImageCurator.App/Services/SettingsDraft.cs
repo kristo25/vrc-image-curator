@@ -16,7 +16,8 @@ public sealed record SettingsDraft(
     bool StartWithWindows,
     bool BringReviewForwardWhenHeld,
     int WatchScanSeconds = AutomationSettings.DefaultWatchScanSeconds,
-    WatchMode WatchMode = WatchMode.OnDetection)
+    WatchMode WatchMode = WatchMode.OnDetection,
+    OrganizationPolicy OrganizationPolicy = OrganizationPolicy.CategoryRoot)
 {
     /// <summary>
     /// Returns the first invariant this draft would break, or <see langword="null"/> when it is
@@ -141,6 +142,7 @@ public sealed record SettingsDraft(
         state.Settings.OutputRootConfirmed = true;
         state.Settings.OrganizationPolicy = OrganizationPolicy.PreserveIncomingRelativeFolder;
         state.Settings.SimilarityProfile = SimilarityProfile;
+        state.Settings.OrganizationPolicy = OrganizationPolicy;
         state.Settings.Automation.WatchWhileOpen = false;
         state.Settings.Automation.StartWithWindows = StartWithWindows;
         state.Settings.Automation.WatchMode = WatchMode;

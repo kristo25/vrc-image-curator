@@ -16,3 +16,6 @@ TestResults/
 /build-log.txt
 /push-to-github.bat
 /Claude outputs/
+/git-report.bat
+/git-report.txt
+/git-commit-log.txt

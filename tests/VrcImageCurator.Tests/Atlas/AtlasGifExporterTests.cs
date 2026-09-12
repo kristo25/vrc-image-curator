@@ -107,6 +107,279 @@ public sealed class AtlasGifExporterTests
                 Parse(name)));
     }
 
+    [Fact]
+    public async Task AnAlreadyAnimatedFileIsRefused()
+    {
+        using var directory = new TestDirectory();
+        var path = directory.GetPath("sheets", "x_a_4frames_10fps_linearloopStyle.gif");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using (var animated = new Image<Rgba32>(64, 64))
+        {
+            animated.Frames.AddFrame(animated.Frames.RootFrame);
+            animated.SaveAsGif(path);
+        }
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => new AtlasGifExporter().ExportAsync(
+                path,
+                directory.GetPath("out", "a.gif"),
+                new EmojiAtlasName(4, 10, AtlasLoopStyle.Linear)));
+
+        Assert.Contains("already animated", failure.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task TheNameDecidesHowManyFramesTheAnimationHas()
+    {
+        using var directory = new TestDirectory();
+        // Three frames claimed, but all four cells of the 2x2 grid carry art. The name wins: the
+        // animation is three frames long and the fourth cell is simply not in it. VRChat writes
+        // that count itself and it is right far more often than any reading of the pixels, so
+        // refusing the sheet was the more common mistake by a wide margin.
+        const string name = "x_a_3frames_10fps_linearloopStyle.png";
+        var path = directory.GetPath("sheets", name);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using (var image = new Image<Rgba32>(128, 128))
+        {
+            image.ProcessPixelRows(accessor =>
+            {
+                for (var y = 0; y < accessor.Height; y++)
+                {
+                    var span = accessor.GetRowSpan(y);
+                    for (var x = 0; x < span.Length; x++)
+                    {
+                        var inset = (x % 64) is > 8 and < 56 && (y % 64) is > 8 and < 56;
+                        var cell = ((y / 64) * 2) + (x / 64);
+                        span[x] = inset ? new Rgba32((byte)(40 + (cell * 50)), 120, 200, 255) : default;
+                    }
+                }
+            });
+            image.SaveAsPng(path);
+        }
+
+        var result = await new AtlasGifExporter().ExportAsync(
+            path,
+            directory.GetPath("out", "a.gif"),
+            Parse(name));
+
+        Assert.Equal(3, result.FrameCount);
+        Assert.True(File.Exists(result.Path));
+    }
+
+    [Fact]
+    public async Task ASheetThatUsesFewerCellsThanItsGridStillExports()
+    {
+        using var directory = new TestDirectory();
+        // Three frames on a 2x2 grid: the fourth cell is empty, which is exactly what a sheet that
+        // does not fill its grid looks like and must not be mistaken for a mismatch.
+        const string name = "x_a_3frames_10fps_linearloopStyle.png";
+        var source = WriteSheet(directory, name, frames: 3, canvas: 128);
+
+        var result = await new AtlasGifExporter().ExportAsync(
+            source,
+            directory.GetPath("out", "a.gif"),
+            Parse(name));
+
+        Assert.Equal(3, result.FrameCount);
+    }
+
+    [Fact]
+    public async Task AnOpaqueSheetIsJudgedAgainstItsBackgroundRatherThanItsAlpha()
+    {
+        using var directory = new TestDirectory();
+        // Three frames on a 2x2 grid with no transparency anywhere. Judged on alpha alone the
+        // empty fourth cell would look occupied and the sheet could never leave review.
+        const string name = "x_a_3frames_10fps_linearloopStyle.png";
+        var path = directory.GetPath("sheets", name);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using (var image = new Image<Rgba32>(128, 128))
+        {
+            var background = new Rgba32(18, 18, 24, 255);
+            image.ProcessPixelRows(accessor =>
+            {
+                for (var y = 0; y < accessor.Height; y++)
+                {
+                    var span = accessor.GetRowSpan(y);
+                    for (var x = 0; x < span.Length; x++)
+                    {
+                        var cell = ((y / 64) * 2) + (x / 64);
+                        span[x] = cell < 3
+                            ? new Rgba32((byte)(60 + (cell * 60)), 120, 200, 255)
+                            : background;
+                    }
+                }
+            });
+            image.SaveAsPng(path);
+        }
+
+        var result = await new AtlasGifExporter().ExportAsync(
+            path,
+            directory.GetPath("out", "a.gif"),
+            Parse(name));
+
+        Assert.Equal(3, result.FrameCount);
+    }
+
+
+    [Fact]
+    public async Task AFaintEdgeSpillingPastTheLastFrameIsNotMistakenForOne()
+    {
+        // Three frames on a 2x2 grid, with a one-pixel band of the fourth cell drawn on: what a
+        // soft edge or a glow does when it crosses a cell boundary. Real VRChat art is full-bleed,
+        // so this is ordinary, and it used to park a sheet in review permanently.
+        using var directory = new TestDirectory();
+        const string name = "x_a_3frames_10fps_linearloopStyle.png";
+        var path = directory.GetPath("sheets", name);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using (var image = new Image<Rgba32>(128, 128))
+        {
+            image.ProcessPixelRows(accessor =>
+            {
+                for (var y = 0; y < accessor.Height; y++)
+                {
+                    var span = accessor.GetRowSpan(y);
+                    for (var x = 0; x < span.Length; x++)
+                    {
+                        var cell = ((y / 64) * 2) + (x / 64);
+                        var spill = cell == 3 && y == 64 && x < 104;
+                        span[x] = cell < 3 || spill
+                            ? new Rgba32((byte)(40 + (cell * 50)), 120, 200, 255)
+                            : default;
+                    }
+                }
+            });
+            image.SaveAsPng(path);
+        }
+
+        var result = await new AtlasGifExporter().ExportAsync(
+            path,
+            directory.GetPath("out", "a.gif"),
+            Parse(name));
+
+        Assert.Equal(3, result.FrameCount);
+    }
+
+    [Fact]
+    public async Task ArtLeftOutOfTheAnimationIsStillReported()
+    {
+        // Left out, but not passed over in silence: the export says what it did not include and
+        // which count would have taken it in, so a person can judge without being stopped.
+        using var directory = new TestDirectory();
+        const string name = "x_a_3frames_10fps_linearloopStyle.png";
+        var path = directory.GetPath("sheets", name);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using (var image = new Image<Rgba32>(128, 128))
+        {
+            image.ProcessPixelRows(accessor =>
+            {
+                for (var y = 0; y < accessor.Height; y++)
+                {
+                    var span = accessor.GetRowSpan(y);
+                    for (var x = 0; x < span.Length; x++)
+                    {
+                        var inset = (x % 64) is > 8 and < 56 && (y % 64) is > 8 and < 56;
+                        var cell = ((y / 64) * 2) + (x / 64);
+                        span[x] = inset ? new Rgba32((byte)(40 + (cell * 50)), 120, 200, 255) : default;
+                    }
+                }
+            });
+            image.SaveAsPng(path);
+        }
+
+        var result = await new AtlasGifExporter().ExportAsync(
+            path,
+            directory.GetPath("out", "a.gif"),
+            Parse(name));
+
+        Assert.Equal(3, result.FrameCount);
+        Assert.NotNull(result.Note);
+        Assert.Contains("art in 4 of 4 cells", result.Note, StringComparison.Ordinal);
+        Assert.Contains("4 frames would take in everything drawn", result.Note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ArtInACellTheNameDoesNotReachIsReportedEvenWhenTheCountsAgree()
+    {
+        // Three cells drawn and three frames named, so counting alone calls this an agreement - but
+        // one of the three sits past the last frame and is dropped. Position has to be part of the
+        // question, or the note stays silent about art the review pane is busy outlining.
+        using var directory = new TestDirectory();
+        const string name = "x_a_3frames_10fps_linearloopStyle.png";
+        var path = directory.GetPath("sheets", name);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using (var image = new Image<Rgba32>(128, 128))
+        {
+            image.ProcessPixelRows(accessor =>
+            {
+                for (var y = 0; y < accessor.Height; y++)
+                {
+                    var span = accessor.GetRowSpan(y);
+                    for (var x = 0; x < span.Length; x++)
+                    {
+                        var inset = (x % 64) is > 8 and < 56 && (y % 64) is > 8 and < 56;
+                        var cell = ((y / 64) * 2) + (x / 64);
+                        // Cells 0, 1 and 3 are drawn on; cell 2 is a blank frame, which is ordinary.
+                        span[x] = inset && cell != 2
+                            ? new Rgba32((byte)(40 + (cell * 50)), 120, 200, 255)
+                            : default;
+                    }
+                }
+            });
+            image.SaveAsPng(path);
+        }
+
+        var result = await new AtlasGifExporter().ExportAsync(
+            path,
+            directory.GetPath("out", "a.gif"),
+            Parse(name));
+
+        Assert.Equal(3, result.FrameCount);
+        Assert.NotNull(result.Note);
+        Assert.Contains("4 frames would take in everything drawn", result.Note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ASheetWithNothingPastItsLastFrameSaysNothing()
+    {
+        using var directory = new TestDirectory();
+        const string name = "x_a_3frames_10fps_linearloopStyle.png";
+        var source = WriteSheet(directory, name, frames: 3, canvas: 128);
+
+        var result = await new AtlasGifExporter().ExportAsync(
+            source,
+            directory.GetPath("out", "a.gif"),
+            Parse(name));
+
+        Assert.Null(result.Note);
+    }
+
+    [Theory]
+    // A rate GIF cannot divide evenly lands on the nearest hundredth, and both the tab and the
+    // export result have to name the same one. These used to disagree by a frame a second.
+    [InlineData(17, 17)]
+    [InlineData(8, 8)]
+    [InlineData(30, 33)]
+    [InlineData(60, 50)]
+    public void OneAnswerForTheRateAFileWillReallyPlayAt(int requested, int effective)
+    {
+        Assert.Equal(effective, AtlasGifExporter.EffectiveFramesPerSecondFor(requested));
+    }
+
+    [Fact]
+    public async Task TheExportReportsTheSameRateTheCatalogWould()
+    {
+        using var directory = new TestDirectory();
+        const string name = "x_a_4frames_17fps_linearloopStyle.png";
+        var source = WriteSheet(directory, name, frames: 4, canvas: 128);
+
+        var result = await new AtlasGifExporter().ExportAsync(
+            source,
+            directory.GetPath("out", "a.gif"),
+            Parse(name));
+
+        Assert.Equal(AtlasGifExporter.EffectiveFramesPerSecondFor(17), result.EffectiveFramesPerSecond);
+    }
+
     private static EmojiAtlasName Parse(string name)
     {
         Assert.True(EmojiAtlasName.TryParse(name, out var parsed));

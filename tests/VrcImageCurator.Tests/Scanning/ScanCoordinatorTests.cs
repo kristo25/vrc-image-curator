@@ -1,4 +1,7 @@
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
+using VrcImageCurator.Core.Atlas;
 using VrcImageCurator.Core.FileSystem;
 using VrcImageCurator.Core.Imaging;
 using VrcImageCurator.Core.Models;
@@ -263,6 +266,14 @@ public sealed class ScanCoordinatorTests
         using var image = ImageFixtureFactory.CreatePattern(63);
         await image.SaveAsPngAsync(Path.Combine(month, "emoji.png"));
         using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+
+        // Archiving flat is the default now, so a test about keeping the incoming folders has to
+        // ask for that policy rather than inherit it.
+        await store.UpdateAsync(state =>
+        {
+            state.Settings.OrganizationPolicy = OrganizationPolicy.PreserveIncomingRelativeFolder;
+            return true;
+        });
         var decoder = new ImageDecoder();
         var coordinator = new ScanCoordinator(
             store,
@@ -908,5 +919,277 @@ public sealed class ScanCoordinatorTests
             Assert.Equal(1, result.Examined);
             Assert.Empty(result.Errors);
         }
+    }
+
+    [Fact]
+    public async Task AnAnimatedSheetIsFiledWithTheAnimationItProduced()
+    {
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        const string name = "player_x_4frames_10fps_linearloopStyle.png";
+        WriteSheet(Path.Combine(sourceRoot, name));
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var coordinator = CreateCoordinator(store);
+
+        var result = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+
+        Assert.Empty(result.Errors);
+        Assert.Equal(1, result.MovedUnique);
+        Assert.Equal(1, result.Animated);
+
+        var animation = Path.Combine(archiveRoot, "Animated", "player_x_4frames_10fps_linearloopStyle.gif");
+        var filed = Path.Combine(archiveRoot, "Animated", "Gif Ref", name);
+        Assert.True(File.Exists(animation));
+        Assert.True(File.Exists(filed));
+        // The sheet does not stay among the stills a person browses.
+        Assert.False(File.Exists(Path.Combine(archiveRoot, name)));
+
+        var state = await store.LoadAsync();
+        var indexed = Assert.Single(
+            state.ArchiveIndex.Categories.Single(item => item.Category == VrcImageCategory.Emoji).Images);
+        Assert.Equal(filed, indexed.Path);
+    }
+
+    [Fact]
+    public async Task AFiledSheetIsStillRecognisedWhenTheSameEmojiArrivesAgain()
+    {
+        // The reference folder sits inside the folder the indexer skips, so the whole point of
+        // carving it back out is this: a second copy of an emoji already animated must be caught
+        // as a duplicate rather than archived and animated all over again.
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        const string name = "player_x_4frames_10fps_linearloopStyle.png";
+        WriteSheet(Path.Combine(sourceRoot, name));
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var coordinator = CreateCoordinator(store);
+        await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+
+        WriteSheet(Path.Combine(sourceRoot, name));
+        var second = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+
+        Assert.Equal(0, second.MovedUnique);
+        Assert.Equal(0, second.Animated);
+        Assert.Equal(1, second.AutoKeptArchived);
+
+        // The second scan indexes the animation as well as the sheet, so the archive holds two
+        // records. What matters is that the sheet is still there exactly once.
+        var state = await store.LoadAsync();
+        var images = state.ArchiveIndex.Categories
+            .Single(item => item.Category == VrcImageCategory.Emoji).Images;
+        Assert.Single(images, image => image.Path.EndsWith(".png", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task ASheetThatCouldNotBeAnimatedStaysWhereItCanBeSeen()
+    {
+        // Twenty frames need an 8x8 grid, and 1020 pixels do not divide into eight whole cells, so
+        // there is no layout to animate at all. That is a real failure rather than a disagreement
+        // about frame count, and the sheet stays among the stills where it can be seen instead of
+        // being filed away as finished work.
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        const string name = "player_x_20frames_10fps_linearloopStyle.png";
+        using (var image = new Image<Rgba32>(1020, 1020))
+        {
+            image.Mutate(context => context.BackgroundColor(Color.FromRgb(30, 90, 160)));
+            await image.SaveAsPngAsync(Path.Combine(sourceRoot, name));
+        }
+
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var coordinator = CreateCoordinator(store);
+
+        var result = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+
+        Assert.Equal(1, result.MovedUnique);
+        Assert.Equal(0, result.Animated);
+        Assert.True(File.Exists(Path.Combine(archiveRoot, name)));
+        Assert.False(Directory.Exists(Path.Combine(archiveRoot, "Animated", "Gif Ref")));
+    }
+
+
+    [Fact]
+    public async Task AReadyMadeGifIsFiledWithTheAnimationsRatherThanTheStills()
+    {
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        WriteGif(Path.Combine(sourceRoot, "loose.gif"), 3);
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var coordinator = CreateCoordinator(store);
+
+        var result = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+
+        Assert.Equal(1, result.MovedUnique);
+        Assert.True(File.Exists(Path.Combine(archiveRoot, "Animated", "loose.gif")));
+        Assert.False(File.Exists(Path.Combine(archiveRoot, "loose.gif")));
+    }
+
+    [Fact]
+    public async Task ASecondCopyOfAnArchivedGifIsRecognised()
+    {
+        // Animations are indexed like everything else, so the copy that arrives second is caught
+        // the same way a repeated still is. They used to be invisible to the index and archived
+        // again on every scan.
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        WriteGif(Path.Combine(sourceRoot, "loose.gif"), 3);
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var coordinator = CreateCoordinator(store);
+        await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+
+        WriteGif(Path.Combine(sourceRoot, "loose.gif"), 3);
+        var second = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+
+        Assert.Equal(0, second.MovedUnique);
+        Assert.Equal(1, second.AutoKeptArchived);
+    }
+
+    [Fact]
+    public async Task AGifThatMatchesTheSheetsOwnAnimationIsRecycled()
+    {
+        // The sheet is archived but never animated. A ready-made GIF of the same emoji then
+        // arrives: the sheet's own animation is generated so there is something to compare
+        // against, and the incoming copy turns out to be the same animation.
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        const string sheetName = "player_x_4frames_10fps_linearloopStyle.png";
+        var archivedSheet = Path.Combine(archiveRoot, sheetName);
+        WriteSheet(archivedSheet);
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var coordinator = CreateCoordinator(store);
+        await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+        var generated = Path.Combine(
+            archiveRoot, "Animated", "player_x_4frames_10fps_linearloopStyle.gif");
+        Assert.True(File.Exists(generated));
+
+        // Keep a copy as the incoming GIF, then put the archive back to a sheet with no animation
+        // and skip it so the backfill leaves it that way. Now the only way to judge the incoming
+        // file is to make the sheet's animation on the spot and compare the two.
+        var incoming = Path.Combine(sourceRoot, "player_x_4frames_10fps_linearloopStyle.gif");
+        File.Copy(generated, incoming);
+        File.Delete(generated);
+        var archived = (await store.LoadAsync()).ArchiveIndex.Categories
+            .Single(item => item.Category == VrcImageCategory.Emoji).Images
+            .Single(item => item.Path.EndsWith(".png", StringComparison.Ordinal));
+        await store.UpdateAsync(state =>
+        {
+            state.SkippedAnimations.Add(archived.ExactFingerprint);
+            return true;
+        });
+
+        var result = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+
+        Assert.Equal(0, result.MovedUnique);
+        Assert.Equal(1, result.AutoKeptArchived);
+        Assert.False(File.Exists(incoming));
+    }
+
+    [Fact]
+    public async Task AnArchivedGifIsNotOverwrittenByTheSheetThatArrivesAfterIt()
+    {
+        // The GIF lands first and is archived under the very name the sheet's export would take.
+        // The exporter writes with overwrite, so without care the sheet would destroy an archived
+        // file and leave the index describing pixels that are gone.
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        const string stem = "player_x_4frames_10fps_linearloopStyle";
+        WriteGif(Path.Combine(sourceRoot, stem + ".gif"), 3);
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var coordinator = CreateCoordinator(store);
+        await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+
+        var archivedGif = Path.Combine(archiveRoot, "Animated", stem + ".gif");
+        Assert.True(File.Exists(archivedGif));
+        var before = await File.ReadAllBytesAsync(archivedGif);
+
+        WriteSheet(Path.Combine(sourceRoot, stem + ".png"));
+        var result = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+
+        Assert.Equal(1, result.MovedUnique);
+        Assert.Equal(before, await File.ReadAllBytesAsync(archivedGif));
+    }
+
+    [Fact]
+    public async Task ArtLeftOutOfAnAnimationIsReportedByTheScan()
+    {
+        // The sheet is animated to its name and then filed away as finished. If some of its art did
+        // not make it into the animation, the scan is the only place that will ever say so - it is
+        // not a failure, but it is not nothing either.
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        const string name = "player_x_3frames_10fps_linearloopStyle.png";
+        WriteSheet(Path.Combine(sourceRoot, name));
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var coordinator = CreateCoordinator(store);
+
+        var result = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+
+        Assert.Equal(1, result.MovedUnique);
+        Assert.Equal(1, result.Animated);
+        Assert.Contains(result.Errors, message => message.Contains("4 of 4 cells", StringComparison.Ordinal));
+    }
+
+    /// <summary>A small animation of solid frames, standing in for a ready-made GIF.</summary>
+    private static void WriteGif(string path, int frames)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using var image = new Image<Rgba32>(32, 32);
+        image.Mutate(context => context.BackgroundColor(Color.FromRgb(10, 60, 120)));
+        for (var index = 1; index < frames; index++)
+        {
+            using var frame = new Image<Rgba32>(32, 32);
+            frame.Mutate(context => context.BackgroundColor(
+                Color.FromRgb((byte)(10 + (index * 40)), 60, 120)));
+            image.Frames.AddFrame(frame.Frames.RootFrame);
+        }
+
+        image.SaveAsGif(path);
+    }
+
+    /// <summary>
+    /// A 2x2 sheet of four frames, each a solid square inset in its cell so the sheet carries the
+    /// alpha a real emoji sheet does.
+    /// </summary>
+    private static void WriteSheet(string path)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using var image = new Image<Rgba32>(128, 128);
+        image.ProcessPixelRows(accessor =>
+        {
+            for (var y = 0; y < accessor.Height; y++)
+            {
+                var span = accessor.GetRowSpan(y);
+                for (var x = 0; x < span.Length; x++)
+                {
+                    var inset = (x % 64) is > 8 and < 56 && (y % 64) is > 8 and < 56;
+                    var cell = ((y / 64) * 2) + (x / 64);
+                    span[x] = inset ? new Rgba32((byte)(40 + (cell * 50)), 120, 200, 255) : default;
+                }
+            }
+        });
+        image.SaveAsPng(path);
     }
 }

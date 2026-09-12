@@ -23,6 +23,11 @@ public sealed class EmojiAtlasNameTests
     [InlineData("Player_inv_id_shakeanimationStyle.png")]
     [InlineData("Player_inv_id_moneyanimationStyle.png")]
     [InlineData("holiday-photo.png")]
+    // The exported animation carries the same name as the sheet it came from, so only the
+    // extension separates them. Listing one as a sheet would offer to slice an animation.
+    [InlineData("Player_inv_id_stopanimationStyle_64frames_31fps_linearloopStyle.gif")]
+    [InlineData("Player_inv_id_stopanimationStyle_64frames_31fps_linearloopStyle.mp4")]
+    [InlineData("Player_inv_id_stopanimationStyle_64frames_31fps_linearloopStyle")]
     [InlineData("")]
     [InlineData(null)]
     // A single frame is a still image, not an animation.

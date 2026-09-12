@@ -10,10 +10,16 @@ public enum VrcImageCategory
     Stickers,
 }
 
+/// <summary>Which subfolders, if any, an archived image is filed into under its category.</summary>
 public enum OrganizationPolicy
 {
+    /// <summary>Everything for a category lands directly in that category's folder.</summary>
     CategoryRoot,
+
+    /// <summary>One folder per month, taken from when the image was written.</summary>
     CategoryYearMonth,
+
+    /// <summary>Whatever folders the image already sat in under its source are recreated.</summary>
     PreserveIncomingRelativeFolder,
 }
 
@@ -91,6 +97,12 @@ public enum JournalOperationPurpose
     DeleteArchiveCandidate,
     PreserveArchiveCandidate,
     RestoreReviewToSource,
+
+    /// <summary>
+    /// Files an archived sheet beside the animation just made from it. The image is already in the
+    /// index by this point, so the commit moves the record rather than adding one.
+    /// </summary>
+    FileAnimatedSheet,
 }
 
 public enum JournalPhase
@@ -117,6 +129,16 @@ public sealed class AppStateDocument
 
     public List<ReviewItem> ReviewQueue { get; set; } = [];
 
+    /// <summary>
+    /// Sheets a person has decided not to animate, by exact image fingerprint.
+    /// </summary>
+    /// <remarks>
+    /// Keyed by fingerprint rather than by index id or path, because both of those move: rebuilding
+    /// the archive index mints new ids, and filing a sheet beside its animation changes its path.
+    /// The fingerprint is the one thing that survives both, so a sheet skipped once stays skipped.
+    /// </remarks>
+    public List<string> SkippedAnimations { get; set; } = [];
+
     public List<JournalEntry> OperationJournal { get; set; } = [];
 
     public List<ActivityEntry> History { get; set; } = [];
@@ -132,7 +154,7 @@ public sealed class AppSettings
 
     public List<LegacyArchiveMapping> LegacyArchiveMappings { get; set; } = [];
 
-    public OrganizationPolicy OrganizationPolicy { get; set; } = OrganizationPolicy.CategoryYearMonth;
+    public OrganizationPolicy OrganizationPolicy { get; set; } = OrganizationPolicy.CategoryRoot;
 
     public SimilarityProfile SimilarityProfile { get; set; } = SimilarityProfile.Conservative;
 
@@ -417,7 +439,7 @@ public static class AppStateDefaults
                 HoldingRootPath = stateDirectoryPath is null
                     ? Path.Combine(localAppDataPath, "VrcImageCurator", "Holding")
                     : Path.Combine(stateDirectoryPath, "Holding"),
-                OrganizationPolicy = OrganizationPolicy.PreserveIncomingRelativeFolder,
+                OrganizationPolicy = OrganizationPolicy.CategoryRoot,
             },
             ArchiveIndex = new ArchiveIndexState
             {
@@ -563,7 +585,10 @@ public static class AppStateMigrator
             index.LastError = "Application settings were migrated to the single output-root model.";
         }
 
-        state.Settings.OrganizationPolicy = OrganizationPolicy.PreserveIncomingRelativeFolder;
+        // The migration resets the policy the same way it resets the rest of the routing settings,
+        // so a state file carried across lands on the current default rather than on whatever the
+        // old model happened to leave behind.
+        state.Settings.OrganizationPolicy = OrganizationPolicy.CategoryRoot;
         state.Settings.Automation.WatchWhileOpen = false;
         state.SchemaVersion = AppStateDocument.CurrentSchemaVersion;
         return true;

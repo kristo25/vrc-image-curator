@@ -29,6 +29,14 @@ public sealed record EmojiAtlasName(int FrameCount, int FramesPerSecond, AtlasLo
 
     public const int MaximumFramesPerSecond = 240;
 
+    /// <summary>
+    /// What a sheet can be. A sheet is one still image; an already animated file is what this
+    /// feature produces, not what it consumes - and VRChat's exported GIF carries the very same
+    /// name as the sheet it came from, so the name alone cannot tell them apart.
+    /// </summary>
+    private static readonly HashSet<string> SheetExtensions =
+        new(StringComparer.OrdinalIgnoreCase) { ".png", ".jpg", ".jpeg", ".webp" };
+
     private static readonly Regex Pattern = new(
         @"_(?<frames>\d{1,4})frames_(?<fps>\d{1,3})fps(?:_(?<loop>[a-z]+)loopStyle)?",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
@@ -50,7 +58,13 @@ public sealed record EmojiAtlasName(int FrameCount, int FramesPerSecond, AtlasLo
         Match match;
         try
         {
-            match = Pattern.Match(Path.GetFileName(fileNameOrPath));
+            var fileName = Path.GetFileName(fileNameOrPath);
+            if (!SheetExtensions.Contains(Path.GetExtension(fileName)))
+            {
+                return false;
+            }
+
+            match = Pattern.Match(fileName);
         }
         catch (RegexMatchTimeoutException)
         {

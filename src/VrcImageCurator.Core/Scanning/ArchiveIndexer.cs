@@ -96,6 +96,13 @@ public sealed class ArchiveIndexer
         {
             paths = archiveRoots.SelectMany(PathBoundary.EnumerateFilesWithoutReparsePoints)
                 .Where(path => SupportedExtensions.Contains(Path.GetExtension(path)))
+                // Everything under an archive root is indexed, animations included. They were left
+                // out once, on the grounds that a GIF would become a duplicate candidate of the
+                // sheet it came from - but it does not: a sheet is a grid of every frame at full
+                // size and the animation is one frame playing, so they resemble each other about as
+                // much as a contact sheet resembles a film. Leaving them out cost far more than it
+                // saved, because a ready-made GIF arriving in an incoming folder then had nothing
+                // to be compared against and was archived again every time.
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .Order(StringComparer.OrdinalIgnoreCase)
                 .ToArray();

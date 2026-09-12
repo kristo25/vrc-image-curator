@@ -32,6 +32,7 @@
                 </StackPanel>
                 <StackPanel Grid.Column="1" Grid.Row="0" Orientation="Horizontal" VerticalAlignment="Center">
                     <Button x:Name="ReviewNavButton" Content="Review" Margin="0,0,8,0" Click="ShowReviewPage" automation:AutomationProperties.Name="Open review queue" />
+                    <Button x:Name="AnimationsNavButton" Content="Animations" Margin="0,0,8,0" Click="ShowAnimationsPage" automation:AutomationProperties.Name="Open animated emoji" />
                     <Button x:Name="HistoryNavButton" Content="History" Margin="0,0,8,0" Click="ShowHistoryPage" automation:AutomationProperties.Name="Open activity history" />
                     <Button x:Name="SettingsNavButton" Content="Settings" Click="ShowSettingsPage" automation:AutomationProperties.Name="Open settings" />
                 </StackPanel>
@@ -177,6 +178,121 @@
                 </DockPanel>
             </Grid>
 
+            <Grid x:Name="AnimationsPage" Visibility="Collapsed" Margin="24">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <Grid Margin="0,0,0,14">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock x:Name="AnimationsHeading" Focusable="True" FontSize="22" FontWeight="SemiBold" Text="Animated emoji" />
+                        <TextBlock x:Name="AnimationsSubtitle" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap"
+                                   Text="VRChat records the frame count, rate and loop direction in the file name, and that is what the animation follows. Correct any of the three below when a name is wrong." />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Top" Orientation="Horizontal">
+                        <CheckBox x:Name="ShowExportedCheck" Content="Show exported" VerticalAlignment="Center" Margin="0,0,12,0"
+                                  Checked="AnimationFilterChanged" Unchecked="AnimationFilterChanged"
+                                  automation:AutomationProperties.Name="Also list emoji that are already exported" />
+                        <CheckBox x:Name="ShowSkippedCheck" Content="Show skipped" VerticalAlignment="Center" Margin="0,0,12,0"
+                                  Checked="AnimationFilterChanged" Unchecked="AnimationFilterChanged"
+                                  automation:AutomationProperties.Name="Also list emoji you have skipped" />
+                        <Button x:Name="ClearAnimationQueueButton" Padding="9,5" Margin="0,0,8,0" Content="Clear queue"
+                                Click="ClearAnimationQueue" automation:AutomationProperties.Name="Skip every emoji still waiting on a decision" />
+                        <Button x:Name="ExportMissingButton" Padding="9,5" Content="Export missing"
+                                Click="ExportMissingAnimations" automation:AutomationProperties.Name="Export every animation that is missing" />
+                    </StackPanel>
+                </Grid>
+                <Grid Grid.Row="1">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="360" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <ListBox x:Name="SheetList" Margin="0,0,16,0" SelectionChanged="SheetSelected"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             automation:AutomationProperties.Name="Animated emoji in the archive">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Margin="2,4">
+                                    <TextBlock Text="{Binding FileName}" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Text="{Binding Summary}" FontSize="11" Foreground="{StaticResource MutedTextBrush}" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                    <DockPanel Grid.Column="1">
+                        <StackPanel DockPanel.Dock="Top" Margin="0,0,0,10">
+                            <TextBlock x:Name="SheetTitle" FontSize="17" FontWeight="SemiBold" Text="Select an emoji to preview" TextTrimming="CharacterEllipsis" />
+                            <TextBlock x:Name="SheetStatusText" Foreground="{StaticResource MutedTextBrush}" FontSize="12" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <Border DockPanel.Dock="Bottom" Margin="0,12,0,0" Padding="0">
+                            <WrapPanel>
+                                <TextBlock Text="Frames" VerticalAlignment="Center" Margin="0,0,6,0" />
+                                <TextBox x:Name="SheetFrames" Width="64" Margin="0,0,16,0" LostFocus="SheetOverrideChanged"
+                                         automation:AutomationProperties.Name="Frame count" />
+                                <TextBlock Text="Frames per second" VerticalAlignment="Center" Margin="0,0,6,0" />
+                                <TextBox x:Name="SheetRate" Width="64" Margin="0,0,16,0" LostFocus="SheetOverrideChanged"
+                                         automation:AutomationProperties.Name="Frames per second" />
+                                <TextBlock Text="Loop" VerticalAlignment="Center" Margin="0,0,6,0" />
+                                <ComboBox x:Name="SheetLoop" Width="130" Margin="0,0,16,0" Foreground="#111216"
+                                          SelectionChanged="SheetOverrideSelected"
+                                          automation:AutomationProperties.Name="Loop direction">
+                                    <ComboBoxItem Content="Linear" Foreground="#111216" />
+                                    <ComboBoxItem Content="Ping-pong" Foreground="#111216" />
+                                </ComboBox>
+                                <Button x:Name="SkipSheetButton" Padding="9,5" Margin="0,0,8,0" Content="Skip" IsEnabled="False"
+                                        Click="SkipSelectedAnimation" automation:AutomationProperties.Name="Skip this emoji" />
+                                <Button x:Name="ExportSheetButton" Style="{StaticResource PrimaryButton}" Content="Export GIF" IsEnabled="False"
+                                        Click="ExportSelectedAnimation" automation:AutomationProperties.Name="Export this animation" />
+                            </WrapPanel>
+                        </Border>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="12" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <TextBlock Grid.Row="0" Grid.Column="0" Margin="2,0,0,6" FontSize="11"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       Text="The sheet, with every cell the animation uses outlined" />
+                            <TextBlock x:Name="SheetPreviewCaption" Grid.Row="0" Grid.Column="2" Margin="2,0,0,6" FontSize="11"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       Text="What the GIF will look like" />
+
+                            <!-- The sheet and its grid are laid out at the sheet's own pixel size
+                                 inside a Viewbox, so one scale applies to both and the outlines
+                                 cannot drift away from the cells they describe. -->
+                            <Border Grid.Row="1" Grid.Column="0" Background="{StaticResource PreviewBackdropBrush}"
+                                    CornerRadius="6" Padding="10">
+                                <Viewbox Stretch="Uniform" StretchDirection="DownOnly">
+                                    <Grid x:Name="SheetAtlasHost">
+                                        <Image x:Name="SheetAtlasImage"
+                                               RenderOptions.BitmapScalingMode="NearestNeighbor"
+                                               automation:AutomationProperties.Name="The sheet being reviewed" />
+                                        <UniformGrid x:Name="SheetCellOverlay" />
+                                    </Grid>
+                                </Viewbox>
+                            </Border>
+
+                            <Border Grid.Row="1" Grid.Column="2" Background="{StaticResource PreviewBackdropBrush}"
+                                    CornerRadius="6" Padding="10">
+                                <Image x:Name="SheetPreview" Stretch="Uniform" StretchDirection="DownOnly"
+                                       RenderOptions.BitmapScalingMode="NearestNeighbor"
+                                       automation:AutomationProperties.Name="Animation preview" />
+                            </Border>
+                        </Grid>
+                    </DockPanel>
+                </Grid>
+            </Grid>
+
             <Grid x:Name="HistoryPage" Visibility="Collapsed" Margin="24">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
@@ -256,6 +372,23 @@
                             <TextBlock FontSize="12" Foreground="{StaticResource MutedTextBrush}" Text="Conservative is recommended." />
                         </StackPanel>
                         <ComboBox x:Name="SimilarityCombo" Grid.Column="1" SelectionChanged="SettingsSelectionChanged">
+                            <ComboBox.Resources>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Foreground" Value="#111216" />
+                                </Style>
+                            </ComboBox.Resources>
+                        </ComboBox>
+                    </Grid>
+
+                    <Grid Margin="0,0,0,20">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="210" /><ColumnDefinition Width="300" /></Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock FontWeight="SemiBold" Text="Archive folders" />
+                            <TextBlock FontSize="12" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap"
+                                       Text="Where an image is filed under its category folder. Existing files are not moved." />
+                        </StackPanel>
+                        <ComboBox x:Name="OrganizationCombo" Grid.Column="1" VerticalAlignment="Top" SelectionChanged="SettingsSelectionChanged"
+                                  automation:AutomationProperties.Name="Where archived images are filed">
                             <ComboBox.Resources>
                                 <Style TargetType="TextBlock">
                                     <Setter Property="Foreground" Value="#111216" />
