@@ -140,7 +140,6 @@ public sealed record SettingsDraft(
 
         state.Settings.OutputRootPath = outputRoot;
         state.Settings.OutputRootConfirmed = true;
-        state.Settings.OrganizationPolicy = OrganizationPolicy.PreserveIncomingRelativeFolder;
         state.Settings.SimilarityProfile = SimilarityProfile;
         state.Settings.OrganizationPolicy = OrganizationPolicy;
         state.Settings.Automation.WatchWhileOpen = false;
