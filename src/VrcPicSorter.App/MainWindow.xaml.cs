@@ -897,6 +897,15 @@ public partial class MainWindow : Window
             return;
         }
 
+        // Worked out before the draft is applied, because it is the archive paths as they stand
+        // that say where the images are now.
+        IReadOnlyList<ArchiveRelocationStep> relocation = string.Equals(
+            settings.ArchiveRelocationAnsweredFor,
+            Path.GetFullPath(draft.OutputRootPath),
+            StringComparison.OrdinalIgnoreCase)
+            ? []
+            : ArchiveRelocation.Plan(settings, draft.OutputRootPath);
+
         var startupChanged = settings.Automation.StartWithWindows != draft.StartWithWindows;
         await _runtime.StateStore.UpdateAsync(
             state =>
@@ -912,12 +921,132 @@ public partial class MainWindow : Window
             await _runtime.ApplyAutomationSettingsAsync(updateStartupRegistration: startupChanged);
         }
 
+        await OfferToBringTheArchiveAlongAsync(draft.OutputRootPath, relocation);
+
         UpdateResolvedDestinations(draft.OutputRootPath);
         UpdateStartupStatusText();
         var missing = draft.DescribeMissingFolders();
         ShowSettingsNotice(
             missing ?? $"Settings saved at {DateTime.Now:t}.",
             isWarning: missing is not null);
+    }
+
+    /// <summary>
+    /// Offers to move an archive that the new output folder has left behind, and remembers the
+    /// answer so the question is asked once rather than on every save.
+    /// </summary>
+    /// <remarks>
+    /// Whichever way it is answered, the new location is made ready. Saying no should cost nothing
+    /// beyond the files staying where they are: both archives go on being indexed, and new images
+    /// are filed in the new one.
+    /// </remarks>
+    private async Task OfferToBringTheArchiveAlongAsync(
+        string outputRoot,
+        IReadOnlyList<ArchiveRelocationStep> relocation)
+    {
+        if (relocation.Count == 0)
+        {
+            return;
+        }
+
+        var files = relocation.Sum(step => step.FileCount);
+        var gigabytes = relocation.Sum(step => step.TotalBytes) / (double)(1024 * 1024 * 1024);
+        var folders = string.Join(
+            Environment.NewLine,
+            relocation.Select(step => $"    {step.From}  ({step.FileCount} images)"));
+
+        var move = MessageBox.Show(
+            this,
+            $"{files} images are still filed in your previous archive:{Environment.NewLine}{Environment.NewLine}"
+                + $"{folders}{Environment.NewLine}{Environment.NewLine}"
+                + $"Move them into {outputRoot}? ({gigabytes:0.##} GB){Environment.NewLine}{Environment.NewLine}"
+                + "Either way the new folder is set up and new images are filed there. Moving also "
+                + "frees the old folders to be scanned like any other.",
+            "Bring your archive along?",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question) == MessageBoxResult.Yes;
+
+        // Recorded before the move runs. A move interrupted half way still leaves the question
+        // answered, and what it managed to move is described by the index either way.
+        await _runtime.StateStore.UpdateAsync(
+            state =>
+            {
+                state.Settings.ArchiveRelocationAnsweredFor = Path.GetFullPath(outputRoot);
+                return true;
+            });
+
+        if (!move)
+        {
+            foreach (var step in relocation)
+            {
+                TryCreateFolder(step.To);
+            }
+
+            ShowSettingsNotice(
+                "Your previous archive was left where it is. Both folders stay indexed, so "
+                    + "duplicates are still found across them.",
+                isWarning: false);
+            return;
+        }
+
+        await RunBusyAsync(
+            "Moving your archive...",
+            async () =>
+            {
+                var progress = new Progress<ArchiveRelocationProgress>(
+                    value => SetStatus($"Moving your archive: {value.Moved} of {value.Total} - {value.FileName}"));
+                var result = await ArchiveRelocation.RelocateAsync(relocation, progress, CurrentCancellation);
+
+                await _runtime.StateStore.UpdateAsync(
+                    state =>
+                    {
+                        // Only the folders that actually emptied are forgotten. One that kept a
+                        // file back is still a place images live.
+                        var emptied = relocation.Where(step => IsEmptyNow(step.From)).ToArray();
+                        ArchiveRelocation.RebaseIndex(state, relocation);
+                        ArchiveRelocation.ForgetRelocated(state.Settings, emptied);
+                        return true;
+                    });
+
+                await RefreshAsync();
+                SetStatus(
+                    result.LeftBehind == 0
+                        ? $"Moved {result.Moved} images into the new archive."
+                        : $"Moved {result.Moved} images; {result.LeftBehind} were left where they are.");
+                await ReportScanErrorsAsync(result.Errors);
+            });
+    }
+
+    /// <summary>True when nothing is left in the folder, and false if that cannot be established.</summary>
+    /// <remarks>
+    /// A folder that cannot be read is treated as still holding something. Forgetting an archive
+    /// that turns out to still have images in it would leave those images unindexed and invisible.
+    /// </remarks>
+    private static bool IsEmptyNow(string path)
+    {
+        try
+        {
+            return !Directory.Exists(path) || !Directory.EnumerateFileSystemEntries(path).Any();
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static void TryCreateFolder(string path)
+    {
+        try
+        {
+            Directory.CreateDirectory(path);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            // Scanning creates the folder on demand anyway; this only saves a person the surprise
+            // of an output folder that does not exist yet.
+        }
     }
 
     private async Task ReportSettingsAutoSaveFailureAsync(Exception exception)

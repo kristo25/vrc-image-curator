@@ -156,6 +156,16 @@ public sealed class AppSettings
 
     public OrganizationPolicy OrganizationPolicy { get; set; } = OrganizationPolicy.CategoryRoot;
 
+    /// <summary>
+    /// The output folder a person has already been asked about moving their old archive into.
+    /// </summary>
+    /// <remarks>
+    /// Stored as the destination rather than as a yes or no, so the question returns if they pick
+    /// a different folder later and stays gone while they keep the one they answered for. Asking
+    /// on every save would be nagging; never asking again would make a change of mind impossible.
+    /// </remarks>
+    public string ArchiveRelocationAnsweredFor { get; set; } = string.Empty;
+
     public SimilarityProfile SimilarityProfile { get; set; } = SimilarityProfile.Conservative;
 
     public AutomationSettings Automation { get; set; } = new();
