@@ -228,10 +228,12 @@ public sealed class IndexedImageRecord
     public string PerceptualFingerprint { get; set; } = string.Empty;
 
     /// <summary>
-    /// Held in memory only. Perceptual fingerprints are large - roughly 4 KB for a still image
-    /// and 100 KB for an animated GIF - and keeping them inside the state document meant every
-    /// state write rewrote all of them. They live in a sidecar keyed by <see cref="Id"/> and are
-    /// reattached on load; a record whose fingerprint is missing forces an index rebuild.
+    /// Held in memory only. Perceptual fingerprints are large - a frame carries 8 KB of
+    /// thumbnails, inset variants, alpha and detail samples, which is roughly 11 KB of JSON for a
+    /// still image and 90 KB for an animation - and keeping them inside the state document meant
+    /// every state write rewrote all of them. They live in a sidecar keyed by <see cref="Id"/>
+    /// and are reattached on load; a record whose fingerprint is missing forces an index
+    /// rebuild.
     /// </summary>
     [JsonIgnore]
     public ImageFingerprint? Fingerprint { get; set; }
