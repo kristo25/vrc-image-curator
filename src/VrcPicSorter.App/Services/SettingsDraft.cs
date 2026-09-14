@@ -1,0 +1,154 @@
+using System.IO;
+using VrcPicSorter.Core.FileSystem;
+using VrcPicSorter.Core.Models;
+
+namespace VrcPicSorter.App.Services;
+
+public sealed record CategorySettingsDraft(
+    VrcImageCategory Category,
+    string SourcePath,
+    bool IsEnabled);
+
+public sealed record SettingsDraft(
+    IReadOnlyList<CategorySettingsDraft> Categories,
+    string OutputRootPath,
+    SimilarityProfile SimilarityProfile,
+    bool StartWithWindows,
+    bool BringReviewForwardWhenHeld,
+    int WatchScanSeconds = AutomationSettings.DefaultWatchScanSeconds,
+    WatchMode WatchMode = WatchMode.OnDetection,
+    OrganizationPolicy OrganizationPolicy = OrganizationPolicy.CategoryRoot)
+{
+    /// <summary>
+    /// Returns the first invariant this draft would break, or <see langword="null"/> when it is
+    /// safe to persist. Only overlap problems block a save, because they are the ones that could
+    /// make the app treat its own archive as incoming. A folder that does not exist yet is
+    /// reported by <see cref="DescribeMissingFolders"/> instead: watched folders are allowed to
+    /// appear later.
+    /// </summary>
+    public string? DescribeBlockingProblem(AppSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+
+        try
+        {
+            foreach (var category in Categories.Where(item => item.IsEnabled))
+            {
+                if (string.IsNullOrWhiteSpace(category.SourcePath))
+                {
+                    return $"Choose a source folder for {category.Category} before enabling it.";
+                }
+
+                if (PathBoundary.Overlaps(category.SourcePath, OutputRootPath))
+                {
+                    return $"The {category.Category} source and the output folder cannot overlap.";
+                }
+
+                if (settings.LegacyArchiveMappings.Any(
+                        legacy => !string.IsNullOrWhiteSpace(legacy.ArchivePath)
+                            && PathBoundary.Overlaps(category.SourcePath, legacy.ArchivePath)))
+                {
+                    return $"The {category.Category} source cannot overlap a retained archive folder.";
+                }
+            }
+
+            return !string.IsNullOrWhiteSpace(settings.HoldingRootPath)
+                && PathBoundary.Overlaps(OutputRootPath, settings.HoldingRootPath)
+                ? "The output and application holding folders cannot overlap."
+                : null;
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return "That folder path is not valid, so the change was not saved.";
+        }
+    }
+
+    /// <summary>
+    /// Describes enabled source folders that do not exist yet, or <see langword="null"/> when they
+    /// all do. The output folder is not reported: a scan creates it on demand.
+    /// </summary>
+    public string? DescribeMissingFolders()
+    {
+        var missing = Categories
+            .Where(item => item.IsEnabled
+                && !string.IsNullOrWhiteSpace(item.SourcePath)
+                && !Directory.Exists(item.SourcePath))
+            .Select(item => $"{item.Category} source")
+            .ToList();
+
+        return missing.Count == 0
+            ? null
+            : $"Saved. These folders do not exist yet: {string.Join(", ", missing)}. "
+                + "Scanning skips them until they appear.";
+    }
+
+    public void ApplyTo(AppStateDocument state)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        var outputRoot = Path.GetFullPath(OutputRootPath);
+        var rootChanged = !string.Equals(
+            state.Settings.OutputRootPath,
+            outputRoot,
+            StringComparison.OrdinalIgnoreCase);
+
+        if (rootChanged)
+        {
+            foreach (var mapping in state.Settings.CategoryMappings)
+            {
+                if (string.IsNullOrWhiteSpace(mapping.ArchivePath)
+                    || state.Settings.LegacyArchiveMappings.Any(
+                        legacy => legacy.Category == mapping.Category
+                            && string.Equals(legacy.ArchivePath, mapping.ArchivePath, StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
+
+                state.Settings.LegacyArchiveMappings.Add(new LegacyArchiveMapping
+                {
+                    Category = mapping.Category,
+                    ArchivePath = mapping.ArchivePath,
+                });
+            }
+        }
+
+        foreach (var draft in Categories)
+        {
+            var mapping = state.Settings.CategoryMappings.Single(item => item.Category == draft.Category);
+            var normalizedSource = string.IsNullOrWhiteSpace(draft.SourcePath)
+                ? string.Empty
+                : Path.GetFullPath(draft.SourcePath);
+            var sourceChanged = !string.Equals(
+                mapping.SourcePath,
+                normalizedSource,
+                StringComparison.OrdinalIgnoreCase);
+            mapping.SourcePath = normalizedSource;
+            mapping.ArchivePath = Path.Combine(outputRoot, draft.Category.ToString());
+            mapping.IsEnabled = draft.IsEnabled;
+
+            if (sourceChanged || rootChanged)
+            {
+                var index = state.ArchiveIndex.Categories.Single(item => item.Category == draft.Category);
+                index.Status = IndexStatus.Stale;
+                index.LastError = sourceChanged && rootChanged
+                    ? "Source folder and output root changed."
+                    : sourceChanged
+                        ? "Source folder changed."
+                        : "Output root changed.";
+            }
+        }
+
+        state.Settings.OutputRootPath = outputRoot;
+        state.Settings.OutputRootConfirmed = true;
+        state.Settings.SimilarityProfile = SimilarityProfile;
+        state.Settings.OrganizationPolicy = OrganizationPolicy;
+        state.Settings.Automation.WatchWhileOpen = false;
+        state.Settings.Automation.StartWithWindows = StartWithWindows;
+        state.Settings.Automation.WatchMode = WatchMode;
+        state.Settings.Automation.WatchScanSeconds = Math.Clamp(
+            WatchScanSeconds,
+            AutomationSettings.MinimumWatchScanSeconds,
+            AutomationSettings.MaximumWatchScanSeconds);
+        state.Settings.BringReviewForwardWhenHeld = BringReviewForwardWhenHeld;
+    }
+}

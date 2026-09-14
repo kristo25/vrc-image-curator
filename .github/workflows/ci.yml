@@ -19,22 +19,22 @@ jobs:
           global-json-file: global.json
 
       - name: Restore
-        run: dotnet restore VrcImageCurator.sln
+        run: dotnet restore VrcPicSorter.sln
 
       - name: Verify formatting
-        run: dotnet format VrcImageCurator.sln --verify-no-changes --no-restore
+        run: dotnet format VrcPicSorter.sln --verify-no-changes --no-restore
 
       - name: Build
-        run: dotnet build VrcImageCurator.sln -c Release --no-restore
+        run: dotnet build VrcPicSorter.sln -c Release --no-restore
 
       - name: Test
-        run: dotnet test VrcImageCurator.sln -c Release --no-restore --no-build
+        run: dotnet test VrcPicSorter.sln -c Release --no-restore --no-build
 
       - name: Publish portable executable
-        run: dotnet publish src\VrcImageCurator.App\VrcImageCurator.App.csproj -p:PublishProfile=Portable
+        run: dotnet publish src\VrcPicSorter.App\VrcPicSorter.App.csproj -p:PublishProfile=Portable
 
       - uses: actions/upload-artifact@v4
         with:
-          name: VrcImageCurator-portable
-          path: publish/VrcImageCurator.exe
+          name: VrcPicSorter-portable
+          path: publish/VrcPicSorter.exe
           if-no-files-found: error

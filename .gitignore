@@ -17,7 +17,10 @@ TestResults/
 /push-to-github.bat
 /Claude outputs/
 
-# Local git helpers and their logs: useful on this machine, not part of the product.
+# Local helper scripts and their logs: run by hand on this machine, not part of the product.
 /git-*.bat
 /git-*-log.txt
 /git-report.txt
+/rename*.bat
+/rename*.ps1
+/rename*.txt

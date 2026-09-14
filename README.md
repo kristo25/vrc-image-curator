@@ -1,6 +1,6 @@
-# VRC Image Curator
+# VRC Pic Sorter
 
-VRC Image Curator is a local Windows tool for reviewing duplicate and similar images collected by VRCX. It scans the fixed `Emoji`, `Prints`, and `Stickers` categories, keeps unique images organized, and places possible matches in a persistent visual review queue. It also turns animated emoji sheets into GIFs, using the frame count, rate, and loop direction VRChat writes into the file name. See *Animated emoji* below.
+VRC Pic Sorter is a local Windows tool for reviewing duplicate and similar images collected by VRCX. It scans the fixed `Emoji`, `Prints`, and `Stickers` categories, keeps unique images organized, and places possible matches in a persistent visual review queue. It also turns animated emoji sheets into GIFs, using the frame count, rate, and loop direction VRChat writes into the file name. See *Animated emoji* below.
 
 ## Safety model
 
@@ -99,7 +99,7 @@ PNG, animated GIF, JPG/JPEG, WebP, and BMP are supported. MP4, `.temp`, and unsu
 
 ## Getting started
 
-1. Run `VrcImageCurator.exe`.
+1. Run `VrcPicSorter.exe`.
 2. Open **Settings**.
 3. Choose the source folders and enable the categories you want to use.
 4. Choose one main output folder. The default is `Archived Images` inside your `Pictures\VRChat` folder.
@@ -130,12 +130,12 @@ Changing this decides where new files go. Existing archived files are not moved.
 
 ## Portable installation and removal
 
-Download `VrcImageCurator.exe` from the [latest release](../../releases/latest). No installer is
+Download `VrcPicSorter.exe` from the [latest release](../../releases/latest). No installer is
 required; keep the executable anywhere you can write and run it. Each release also carries a
-`VrcImageCurator.exe.sha256` file, so you can confirm the download matches what the build produced:
+`VrcPicSorter.exe.sha256` file, so you can confirm the download matches what the build produced:
 
 ```powershell
-Get-FileHash VrcImageCurator.exe -Algorithm SHA256
+Get-FileHash VrcPicSorter.exe -Algorithm SHA256
 ```
 
 The executable is not code-signed, so Windows SmartScreen shows *"Windows protected your PC"* the
@@ -150,7 +150,7 @@ If a file operation needs manual attention, use **Settings > Operation recovery*
 After removing the executable, local state can be removed manually from:
 
 ```text
-%LOCALAPPDATA%\VrcImageCurator
+%LOCALAPPDATA%\VrcPicSorter
 ```
 
 If **Start with Windows** was enabled, disable it in Settings before removal. Its per-user registration is stored at:
@@ -159,16 +159,16 @@ If **Start with Windows** was enabled, disable it in Settings before removal. It
 HKCU\Software\Microsoft\Windows\CurrentVersion\Run
 ```
 
-under the value `VrcImageCurator`.
+under the value `VrcPicSorter`.
 
 ## Build
 
 Requires the .NET 10 SDK on Windows.
 
 ```powershell
-dotnet restore VrcImageCurator.sln
-dotnet test VrcImageCurator.sln -c Release
-dotnet publish src\VrcImageCurator.App\VrcImageCurator.App.csproj -p:PublishProfile=Portable
+dotnet restore VrcPicSorter.sln
+dotnet test VrcPicSorter.sln -c Release
+dotnet publish src\VrcPicSorter.App\VrcPicSorter.App.csproj -p:PublishProfile=Portable
 ```
 
 The portable output is written to `publish`.
@@ -177,4 +177,4 @@ For isolated verification, `--data-dir C:\absolute\temporary\folder` redirects s
 
 ## License
 
-VRC Image Curator is released under the MIT License. See [LICENSE](LICENSE) and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+VRC Pic Sorter is released under the MIT License. See [LICENSE](LICENSE) and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

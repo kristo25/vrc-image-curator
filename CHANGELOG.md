@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to VRC Image Curator are recorded here. This project follows
+All notable changes to VRC Pic Sorter are recorded here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.4.0] - 2026-09-14
@@ -32,6 +32,9 @@ All notable changes to VRC Image Curator are recorded here. This project follows
 
 ### Changed
 
+- **The application is now called VRC Pic Sorter**, and the executable is `VrcPicSorter.exe`. The
+  old name described only half of what it does now that emoji sheets are animated as well as
+  deduplicated.
 - **Default archive layout** is now `CategoryRoot`: everything for a category lands directly in
   that category's folder. The layout is selectable in Settings. An existing installation keeps
   whatever it is already set to - only a new installation, or state carried across the settings
@@ -75,6 +78,20 @@ All notable changes to VRC Image Curator are recorded here. This project follows
 The state document format is unchanged. 1.4.0 reads a 1.3.0 state as it stands, and the list of
 skipped sheets is simply empty until the first one is skipped.
 
+The rename is carried across for you the first time 1.4.0 runs:
+
+- `%LOCALAPPDATA%\VrcImageCurator` is moved to `%LOCALAPPDATA%\VrcPicSorter`, so settings, the
+  archive index, the review queue and any held incoming files come with you. The move happens only
+  when there is no new folder already; nothing is ever merged or deleted, so a carry-over that
+  cannot complete leaves you starting fresh with the old folder still on disk.
+- A **Start with Windows** registration is re-registered under the new name and the old entry is
+  removed, so it neither turns itself off nor keeps launching the old executable.
+
+Two things are not moved, deliberately. An archive folder named `VRC Image Curator Replaced` keeps
+its name and its contents, because it holds your files and renaming it would move them without
+being asked. And the old `VrcImageCurator.exe` is simply replaced by the new one - delete it
+whenever you like.
+
 ## [1.3.0] - 2026-09-05
 
 ### Added
@@ -114,7 +131,7 @@ skipped sheets is simply empty until the first one is skipped.
   `fingerprints.json` sidecar that is rewritten only when a fingerprint actually changes, so a
   routine file operation no longer rewrites megabytes of derived data. The state document is
   upgraded to schema 5 the first time 1.3.0 runs. **The upgrade is one way**: keep a copy of
-  `%LOCALAPPDATA%\VrcImageCurator\state.json` if you may want to return to 1.2.0.
+  `%LOCALAPPDATA%\VrcPicSorter\state.json` if you may want to return to 1.2.0.
 - Reading the current state revision no longer parses the whole document, and a completed move
   records three state writes instead of five.
 

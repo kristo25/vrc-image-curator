@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-VRC Image Curator includes the following third-party software.
+VRC Pic Sorter includes the following third-party software.
 
 ## SixLabors.ImageSharp 3.1.12
 

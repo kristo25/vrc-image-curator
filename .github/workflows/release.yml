@@ -28,26 +28,26 @@ jobs:
           global-json-file: global.json
 
       - name: Restore
-        run: dotnet restore VrcImageCurator.sln
+        run: dotnet restore VrcPicSorter.sln
 
       - name: Verify formatting
-        run: dotnet format VrcImageCurator.sln --verify-no-changes --no-restore
+        run: dotnet format VrcPicSorter.sln --verify-no-changes --no-restore
 
       - name: Build
-        run: dotnet build VrcImageCurator.sln -c Release --no-restore
+        run: dotnet build VrcPicSorter.sln -c Release --no-restore
 
       - name: Test
-        run: dotnet test VrcImageCurator.sln -c Release --no-restore --no-build
+        run: dotnet test VrcPicSorter.sln -c Release --no-restore --no-build
 
       - name: Publish portable executable
-        run: dotnet publish src\VrcImageCurator.App\VrcImageCurator.App.csproj -p:PublishProfile=Portable
+        run: dotnet publish src\VrcPicSorter.App\VrcPicSorter.App.csproj -p:PublishProfile=Portable
 
       - name: Check the tag against the assembly version
         shell: pwsh
         run: |
           $tag = if ($env:INPUT_TAG) { $env:INPUT_TAG } else { $env:GITHUB_REF_NAME }
           $expected = $tag.TrimStart('v')
-          $actual = (Get-Item publish/VrcImageCurator.exe).VersionInfo.ProductVersion.Split('+')[0]
+          $actual = (Get-Item publish/VrcPicSorter.exe).VersionInfo.ProductVersion.Split('+')[0]
           if ($actual -ne $expected) {
             throw "Tag $tag does not match the published version $actual. Update <Version> or retag."
           }
@@ -57,8 +57,8 @@ jobs:
       - name: Record the checksum
         shell: pwsh
         run: |
-          $hash = (Get-FileHash publish/VrcImageCurator.exe -Algorithm SHA256).Hash.ToLower()
-          "$hash  VrcImageCurator.exe" | Out-File publish/VrcImageCurator.exe.sha256 -Encoding ascii
+          $hash = (Get-FileHash publish/VrcPicSorter.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  VrcPicSorter.exe" | Out-File publish/VrcPicSorter.exe.sha256 -Encoding ascii
           "SHA256: ``$hash``" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Build the release notes from the changelog
@@ -72,12 +72,12 @@ jobs:
           $rest = $lines[$start..($lines.Length - 1)]
           $end = ($rest | Select-String -Pattern '^## \[' | Select-Object -First 1).LineNumber
           $body = if ($end) { $rest[0..($end - 2)] } else { $rest }
-          $hash = (Get-Content publish/VrcImageCurator.exe.sha256).Split(' ')[0]
+          $hash = (Get-Content publish/VrcPicSorter.exe.sha256).Split(' ')[0]
           $footer = @(
             ''
             '---'
             ''
-            "SHA-256 of ``VrcImageCurator.exe``: ``$hash``"
+            "SHA-256 of ``VrcPicSorter.exe``: ``$hash``"
             ''
             'The executable is not code-signed, so Windows SmartScreen warns on first run.'
             'Choose **More info** then **Run anyway**, or verify the checksum above first.'
@@ -94,7 +94,7 @@ jobs:
         run: |
           $tag = if ($env:INPUT_TAG) { $env:INPUT_TAG } else { $env:GITHUB_REF_NAME }
           gh release create $tag `
-            publish/VrcImageCurator.exe `
-            publish/VrcImageCurator.exe.sha256 `
+            publish/VrcPicSorter.exe `
+            publish/VrcPicSorter.exe.sha256 `
             --title $tag `
             --notes-file release-notes.md
