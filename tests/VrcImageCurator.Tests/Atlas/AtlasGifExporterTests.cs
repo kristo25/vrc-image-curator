@@ -339,6 +339,90 @@ public sealed class AtlasGifExporterTests
     }
 
     [Fact]
+    public async Task BlankCellsInsideTheNamedRangeAreReportedAsBlankFrames()
+    {
+        // The case the wording used to get backwards. Four frames named, art in two of them, and
+        // the art ends well inside the named range - so nothing is left out at all. Both blank
+        // cells are exported and play as empty frames, and the note has to say that rather than
+        // claiming cells were dropped.
+        using var directory = new TestDirectory();
+        const string name = "x_a_4frames_10fps_linearloopStyle.png";
+        var path = directory.GetPath("sheets", name);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using (var image = new Image<Rgba32>(128, 128))
+        {
+            image.ProcessPixelRows(accessor =>
+            {
+                for (var y = 0; y < accessor.Height; y++)
+                {
+                    var span = accessor.GetRowSpan(y);
+                    for (var x = 0; x < span.Length; x++)
+                    {
+                        var inset = (x % 64) is > 8 and < 56 && (y % 64) is > 8 and < 56;
+                        var cell = ((y / 64) * 2) + (x / 64);
+                        // Only cells 0 and 1 are drawn on; 2 and 3 are blank.
+                        span[x] = inset && cell < 2
+                            ? new Rgba32((byte)(40 + (cell * 50)), 120, 200, 255)
+                            : default;
+                    }
+                }
+            });
+            image.SaveAsPng(path);
+        }
+
+        var result = await new AtlasGifExporter().ExportAsync(
+            path,
+            directory.GetPath("out", "a.gif"),
+            Parse(name));
+
+        Assert.Equal(4, result.FrameCount);
+        Assert.NotNull(result.Note);
+        Assert.Contains("art in 2 of 4 cells", result.Note, StringComparison.Ordinal);
+        Assert.Contains("2 cells with nothing drawn on them play as blank frames", result.Note, StringComparison.Ordinal);
+
+        // The other branch's sentence, and the one this used to wrongly borrow.
+        Assert.DoesNotContain("left out", result.Note, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("would take in everything drawn", result.Note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ASingleBlankCellIsReportedInTheSingular()
+    {
+        using var directory = new TestDirectory();
+        const string name = "x_a_4frames_10fps_linearloopStyle.png";
+        var path = directory.GetPath("sheets", name);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using (var image = new Image<Rgba32>(128, 128))
+        {
+            image.ProcessPixelRows(accessor =>
+            {
+                for (var y = 0; y < accessor.Height; y++)
+                {
+                    var span = accessor.GetRowSpan(y);
+                    for (var x = 0; x < span.Length; x++)
+                    {
+                        var inset = (x % 64) is > 8 and < 56 && (y % 64) is > 8 and < 56;
+                        var cell = ((y / 64) * 2) + (x / 64);
+                        // Cells 0, 1 and 2 drawn; only cell 3 is blank.
+                        span[x] = inset && cell < 3
+                            ? new Rgba32((byte)(40 + (cell * 50)), 120, 200, 255)
+                            : default;
+                    }
+                }
+            });
+            image.SaveAsPng(path);
+        }
+
+        var result = await new AtlasGifExporter().ExportAsync(
+            path,
+            directory.GetPath("out", "a.gif"),
+            Parse(name));
+
+        Assert.NotNull(result.Note);
+        Assert.Contains("the one cell with nothing drawn on it plays as a blank frame", result.Note, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ASheetWithNothingPastItsLastFrameSaysNothing()
     {
         using var directory = new TestDirectory();

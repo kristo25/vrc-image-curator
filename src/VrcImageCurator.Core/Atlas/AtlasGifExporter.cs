@@ -114,11 +114,24 @@ public sealed class AtlasGifExporter
         string? note = null;
         if (inspection.DisagreesWithTheName)
         {
-            // Only worth naming a number when it is a different one. Suggesting the count already
-            // in use, as a correction, reads as nonsense.
-            var advice = inspection.FrameCountThatWouldFit > name.FrameCount
-                ? $"The name decided; {inspection.FrameCountThatWouldFit} frames would take in everything drawn."
-                : "The name decided, and the cells it does not reach were left out.";
+            // Two disagreements are possible here and they have opposite consequences, so they get
+            // opposite sentences. Art sitting past the last named frame is dropped from the
+            // animation; blank cells inside the named range are kept and played as empty frames.
+            // Only the first is anything being left out, and naming a larger count is only worth
+            // doing when it is a different number from the one already in use.
+            string advice;
+            if (inspection.FrameCountThatWouldFit > name.FrameCount)
+            {
+                advice = $"The name decided; {inspection.FrameCountThatWouldFit} frames would take in everything drawn.";
+            }
+            else
+            {
+                var blank = name.FrameCount - inspection.CellsWithContent;
+                advice = blank == 1
+                    ? "The name decided, and the one cell with nothing drawn on it plays as a blank frame."
+                    : $"The name decided, and the {blank} cells with nothing drawn on them play as blank frames.";
+            }
+
             note = $"the sheet carries art in {inspection.CellsWithContent} of "
                 + $"{layout.Columns * layout.Rows} cells, and its name counts {name.FrameCount} frames. "
                 + advice;

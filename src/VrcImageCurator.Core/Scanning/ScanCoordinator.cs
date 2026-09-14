@@ -357,6 +357,12 @@ public sealed class ScanCoordinator
         // reason to abort the category.
         var errors = new List<string>(
             indexResult.SkippedFiles.Select(skipped => $"Archive file skipped - {skipped}"));
+
+        // A sheet whose pixels disagree with its name is worth saying out loud, but it is not a
+        // failure: the export did exactly what it was asked to. Kept apart from the errors so it
+        // lands in the history as information rather than raising "scan completed with warnings"
+        // over a sheet that animated perfectly well.
+        var notes = new List<string>();
         var examined = 0;
         var moved = 0;
         var held = 0;
@@ -372,6 +378,7 @@ public sealed class ScanCoordinator
                 category,
                 mapping.ArchivePath,
                 errors,
+                notes,
                 cancellationToken)
             .ConfigureAwait(false);
         var paths = sourceSnapshot.Paths;
@@ -587,11 +594,11 @@ public sealed class ScanCoordinator
                         outcome = "Archived as unique, animated";
 
                         // Said out loud rather than swallowed. The sheet was animated to its name
-                        // and then filed away as finished, so if art was left out of the animation
-                        // this is the only place a person would ever hear about it.
+                        // and then filed away as finished, so the history is the only place a
+                        // person would ever hear what the export made of it.
                         if (animation.Note is { } exportNote)
                         {
-                            errors.Add($"{archivedPath}: {exportNote}");
+                            notes.Add($"{archivedPath}: {exportNote}");
                         }
 
                         // The sheet has served its purpose as a still, so it is filed with the
@@ -638,6 +645,20 @@ public sealed class ScanCoordinator
         await _stateStore.UpdateAsync(
                 state =>
                 {
+                    foreach (var note in notes)
+                    {
+                        state.History.Add(new ActivityEntry
+                        {
+                            Id = Guid.NewGuid(),
+                            OccurredUtc = _timeProvider.GetUtcNow(),
+                            Kind = ActivityKind.Scan,
+                            Level = ActivityLevel.Information,
+                            Category = category,
+                            Message = note,
+                            SourcePath = sourceRoot,
+                        });
+                    }
+
                     state.History.Add(new ActivityEntry
                     {
                         Id = Guid.NewGuid(),
@@ -892,6 +913,7 @@ public sealed class ScanCoordinator
         VrcImageCategory category,
         string archiveRoot,
         List<string> errors,
+        List<string> notes,
         CancellationToken cancellationToken)
     {
         var state = await _stateStore.LoadAsync(cancellationToken).ConfigureAwait(false);
@@ -938,7 +960,7 @@ public sealed class ScanCoordinator
                 written++;
                 if (animation.Note is { } note)
                 {
-                    errors.Add($"{image.Path}: {note}");
+                    notes.Add($"{image.Path}: {note}");
                 }
             }
             else if (animation.Warning is { } warning)

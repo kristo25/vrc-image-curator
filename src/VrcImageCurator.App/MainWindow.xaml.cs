@@ -21,6 +21,7 @@ public partial class MainWindow : Window
     private readonly AppRuntime _runtime;
     private readonly PreviewService _previewService = new();
     private readonly LatestRequestGuard _reviewDisplayRequests = new();
+    private readonly KeepIncomingPrompt _keepIncomingPrompt = new();
     private bool _busy;
     private bool _loadingSettings;
     private CancellationTokenSource? _operationCancellation;
@@ -489,18 +490,26 @@ public partial class MainWindow : Window
                     return;
                 }
 
+                // Asked once per review, not once per match. Settling a review with several
+                // matches takes one press each, and putting the same question behind every one of
+                // them only makes a person dismiss dialogs they have already answered.
                 var canRecycle = _runtime.Router.CanRecycle(candidate.ArchivePath);
-                if (MessageBox.Show(
-                        this,
-                        canRecycle
-                            ? "Recycle this archived match and keep the incoming image? If other matches remain, the review will stay open."
-                            : "Windows Recycle Bin is unavailable for this archive drive. Move the archived match into the VRC Image Curator Replaced folder and keep the incoming image?",
-                        "Keep incoming",
-                        MessageBoxButton.OKCancel,
-                        MessageBoxImage.Warning) != MessageBoxResult.OK)
+                if (_keepIncomingPrompt.MustAsk(review.Id, canRecycle))
                 {
-                    SetStatus("Keep incoming canceled.");
-                    return;
+                    if (MessageBox.Show(
+                            this,
+                            canRecycle
+                                ? "Recycle this archived match and keep the incoming image? If other matches remain, the review stays open and keeping the incoming over them will not ask again."
+                                : "Windows Recycle Bin is unavailable for this archive drive. Move the archived match into the VRC Image Curator Replaced folder and keep the incoming image? If other matches on this drive remain, they will not ask again.",
+                            "Keep incoming",
+                            MessageBoxButton.OKCancel,
+                            MessageBoxImage.Warning) != MessageBoxResult.OK)
+                    {
+                        SetStatus("Keep incoming canceled.");
+                        return;
+                    }
+
+                    _keepIncomingPrompt.Agreed(review.Id, canRecycle);
                 }
 
                 KeepIncomingResult result;
@@ -512,6 +521,11 @@ public partial class MainWindow : Window
                 {
                     await RefreshAsync();
                     throw;
+                }
+
+                if (result.ReviewResolved)
+                {
+                    _keepIncomingPrompt.Forget();
                 }
 
                 await RefreshAsync(result.ReviewResolved ? null : review.Id);

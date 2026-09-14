@@ -1130,11 +1130,12 @@ public sealed class ScanCoordinatorTests
     }
 
     [Fact]
-    public async Task ArtLeftOutOfAnAnimationIsReportedByTheScan()
+    public async Task ArtLeftOutOfAnAnimationIsRecordedWithoutFailingTheScan()
     {
         // The sheet is animated to its name and then filed away as finished. If some of its art did
-        // not make it into the animation, the scan is the only place that will ever say so - it is
-        // not a failure, but it is not nothing either.
+        // not make it into the animation the history is the only place that will ever say so - but
+        // it is not a failure, and counting it among the errors made a scan that did exactly what
+        // it was asked announce itself as having completed with warnings.
         using var directory = new TestDirectory();
         var sourceRoot = directory.GetPath("incoming");
         var archiveRoot = directory.GetPath("archive", "Emoji");
@@ -1149,7 +1150,19 @@ public sealed class ScanCoordinatorTests
 
         Assert.Equal(1, result.MovedUnique);
         Assert.Equal(1, result.Animated);
-        Assert.Contains(result.Errors, message => message.Contains("4 of 4 cells", StringComparison.Ordinal));
+        Assert.Empty(result.Errors);
+
+        var history = (await store.LoadAsync()).History;
+        var note = Assert.Single(
+            history,
+            entry => entry.Message.Contains("4 of 4 cells", StringComparison.Ordinal));
+        Assert.Equal(ActivityLevel.Information, note.Level);
+
+        // The summary entry is what the window reads to decide whether to say "completed with
+        // warnings", so the note must not drag it up to Warning either.
+        Assert.DoesNotContain(
+            history,
+            entry => entry.Level == ActivityLevel.Warning);
     }
 
     /// <summary>A small animation of solid frames, standing in for a ready-made GIF.</summary>
