@@ -1,10 +1,12 @@
+using System.Globalization;
+using VrcImageCurator.Core.Atlas;
 using VrcImageCurator.Core.Imaging;
 using VrcImageCurator.Core.Models;
 using VrcImageCurator.Core.Storage;
 
 namespace VrcImageCurator.Core.FileSystem;
 
-public sealed record FileRouteResult(Guid OperationId, string? DestinationPath);
+public sealed record FileRouteResult(Guid OperationId, string? DestinationPath, Guid? IndexedImageId = null);
 
 public sealed record KeepIncomingResult(bool ReviewResolved, string? PreservedMatchPath);
 
@@ -126,6 +128,38 @@ public sealed class FileRouter
         entry.ReviewItemId = reviewItemId;
         entry.RoutingContext = routingContext;
         entry.IndexedImageAfterCommit = CreateIndexedRecord(category, destination, sourcePath, fingerprint);
+        return await ExecuteMoveAsync(entry, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Moves an already archived sheet to <paramref name="destinationPath"/> and points its index
+    /// record at the new place. Used once an animation has been written, to file the atlas beside
+    /// it.
+    /// </summary>
+    /// <remarks>
+    /// This is a second move of a file that is already safe, so it is journalled like any other:
+    /// a crash between the move and the commit leaves an entry reconciliation can finish from what
+    /// is on disk, rather than an index pointing at a path that no longer exists.
+    /// </remarks>
+    public async Task<FileRouteResult> FileAnimatedSheetAsync(
+        Guid indexedImageId,
+        string archivedPath,
+        string destinationPath,
+        VrcImageCategory category,
+        ImageFingerprint fingerprint,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(archivedPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
+        ArgumentNullException.ThrowIfNull(fingerprint);
+
+        var entry = CreateMoveEntry(
+            archivedPath,
+            destinationPath,
+            category,
+            fingerprint.ExactIdentity,
+            JournalOperationPurpose.FileAnimatedSheet);
+        entry.IndexedImageId = indexedImageId;
         return await ExecuteMoveAsync(entry, cancellationToken).ConfigureAwait(false);
     }
 
@@ -514,9 +548,11 @@ public sealed class FileRouter
                         }
 
                         await ApplySideEffectAsync(entry, cancellationToken).ConfigureAwait(false);
+                        await RestoreCarriedFingerprintAsync(entry, cancellationToken).ConfigureAwait(false);
                         await CommitMutationAsync(entry, cancellationToken).ConfigureAwait(false);
                         break;
                     case JournalReconciliationAction.CommitState:
+                        await RestoreCarriedFingerprintAsync(entry, cancellationToken).ConfigureAwait(false);
                         await CommitMutationAsync(entry, cancellationToken).ConfigureAwait(false);
                         break;
                     case JournalReconciliationAction.MarkCompleted:
@@ -595,7 +631,7 @@ public sealed class FileRouter
         // side effect still leaves SideEffectStarted, which reconciliation resolves correctly
         // from what is actually on disk.
         await CommitMutationAsync(entry, cancellationToken).ConfigureAwait(false);
-        return new FileRouteResult(entry.Id, entry.DestinationPath);
+        return new FileRouteResult(entry.Id, entry.DestinationPath, entry.IndexedImageAfterCommit?.Id);
     }
 
     private async Task ExecuteRecycleAsync(JournalEntry entry, CancellationToken cancellationToken)
@@ -697,6 +733,15 @@ public sealed class FileRouter
 
                 ResolveReview(state, entry.ReviewItemId);
                 break;
+            case JournalOperationPurpose.FileAnimatedSheet:
+                var filed = index.Images.SingleOrDefault(item => item.Id == entry.IndexedImageId);
+                if (filed is not null && entry.DestinationPath is { } filedPath)
+                {
+                    filed.Path = filedPath;
+                    index.Generation++;
+                }
+
+                break;
             case JournalOperationPurpose.KeepExisting:
             case JournalOperationPurpose.AutoKeepArchived:
             case JournalOperationPurpose.RestoreReviewToSource:
@@ -735,6 +780,7 @@ public sealed class FileRouter
             Kind = entry.Purpose switch
             {
                 JournalOperationPurpose.MoveUnique => ActivityKind.AutomaticMove,
+                JournalOperationPurpose.FileAnimatedSheet => ActivityKind.AutomaticMove,
                 JournalOperationPurpose.DeleteArchiveCandidate => ActivityKind.DeletionRequested,
                 JournalOperationPurpose.AutoKeepArchived => ActivityKind.DeletionRequested,
                 _ => ActivityKind.ReviewDecision,
@@ -774,9 +820,24 @@ public sealed class FileRouter
             };
         }
 
-        var outputRoot = PathBoundary.Normalize(routingContext.OutputRootPath);
+        // Where an image is filed is decided by the settings as they stand now, not by the ones the
+        // scan happened to see. A review can sit in the queue across a change of output folder, and
+        // its stored context still names the old one; honouring that would file the image into the
+        // folder the person has just stopped using, and the availability check above - which reads
+        // the current mapping - would be guarding a folder nothing was written to. The context is
+        // still what says which subfolder the image came from, which does not go stale.
+        var outputRoot = PathBoundary.Normalize(state.Settings.OutputRootPath);
         var categoryRoot = Path.Combine(outputRoot, category.ToString());
-        var relativeDirectory = routingContext.RelativeDirectory;
+
+        // Until now the incoming folder structure was always copied across, which meant VRCX's
+        // dated folders were reproduced in the archive whether or not anyone wanted them. The
+        // setting that was supposed to decide this existed but was never read.
+        var relativeDirectory = state.Settings.OrganizationPolicy switch
+        {
+            OrganizationPolicy.CategoryRoot => string.Empty,
+            OrganizationPolicy.CategoryYearMonth => YearMonthFolder(sourcePath),
+            _ => routingContext.RelativeDirectory,
+        };
         if (Path.IsPathRooted(relativeDirectory)
             || relativeDirectory.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                 .Any(part => part == ".."))
@@ -784,14 +845,42 @@ public sealed class FileRouter
             throw new InvalidOperationException("The stored relative image path is unsafe.");
         }
 
+        // A file that is already an animation belongs with the animations, not among the stills.
+        // VRCX hands over ready-made GIFs for some emoji, and filing those in the category root put
+        // a moving picture in the middle of a folder of frames - and somewhere the app would never
+        // look for the animation of a sheet it holds.
+        var filingRoot = AtlasAnimationWriter.IsAnimation(sourcePath)
+            ? Path.Combine(categoryRoot, AtlasAnimationWriter.AnimationFolderName)
+            : categoryRoot;
         var destinationFolder = string.IsNullOrWhiteSpace(relativeDirectory) || relativeDirectory == "."
-            ? categoryRoot
-            : Path.Combine(categoryRoot, relativeDirectory);
+            ? filingRoot
+            : Path.Combine(filingRoot, relativeDirectory);
         PathBoundary.EnsureContained(categoryRoot, destinationFolder, "Image destination");
         PathBoundary.EnsureContained(outputRoot, destinationFolder, "Image destination");
         PathBoundary.EnsureNoReparsePoints(destinationFolder, "Image destination");
 
         return CreateCollisionSafePath(Path.Combine(destinationFolder, Path.GetFileName(sourcePath)));
+    }
+
+    /// <summary>
+    /// The month the image was written, taken from the file rather than the clock so that a
+    /// re-scan of old images files them where they belong instead of under today.
+    /// </summary>
+    private static string YearMonthFolder(string sourcePath)
+    {
+        DateTime written;
+        try
+        {
+            var info = new FileInfo(sourcePath);
+            written = info.Exists ? info.LastWriteTime : DateTime.Now;
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            written = DateTime.Now;
+        }
+
+        return written.ToString("yyyy-MM", CultureInfo.InvariantCulture);
     }
 
     private static string GetRelativeDirectory(string sourceRoot, string sourcePath)
@@ -885,6 +974,42 @@ public sealed class FileRouter
             {
                 return candidate;
             }
+        }
+    }
+
+    /// <summary>
+    /// Puts the fingerprint back on a journal entry that came off disk, by reading it from the file
+    /// the entry has already moved into place.
+    /// </summary>
+    /// <remarks>
+    /// Fingerprints are deliberately not persisted on journal entries, so <see cref="CommitMutationAsync"/>
+    /// carries the one held in memory. After a crash there is no in-memory entry to carry from: the
+    /// record would be committed without a fingerprint, and the next load would notice the gap and
+    /// mark the whole category stale, re-fingerprinting an entire archive because of one interrupted
+    /// move. Re-reading the single file that moved costs one decode and settles it.
+    /// A failure here is not fatal - the entry commits without the fingerprint exactly as it did
+    /// before, and the index rebuild that follows is correct, just slow.
+    /// </remarks>
+    private async Task RestoreCarriedFingerprintAsync(JournalEntry entry, CancellationToken cancellationToken)
+    {
+        if (entry.IndexedImageAfterCommit is not { Fingerprint: null } record
+            || entry.DestinationPath is not { } destination)
+        {
+            return;
+        }
+
+        try
+        {
+            var decoded = await _decoder.DecodeAsync(destination, cancellationToken).ConfigureAwait(false);
+            if (decoded.IsSuccess)
+            {
+                record.Fingerprint = ImageFingerprint.Create(decoded.Image!);
+            }
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            // Left for the index rebuild to sort out.
         }
     }
 

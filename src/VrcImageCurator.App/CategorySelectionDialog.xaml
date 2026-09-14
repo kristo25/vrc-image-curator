@@ -17,11 +17,7 @@
         <TextBlock FontSize="20" FontWeight="SemiBold" Text="Where should these images go?" />
         <TextBlock Grid.Row="1" Margin="0,4,0,14" Foreground="{StaticResource MutedTextBrush}" Text="Choose the archive category for the selected folder." />
         <ComboBox x:Name="CategoryCombo" Grid.Row="2" VerticalAlignment="Top" automation:AutomationProperties.Name="Destination image category"
-                  xmlns:automation="clr-namespace:System.Windows.Automation;assembly=PresentationCore">
-            <ComboBox.Resources>
-                <Style TargetType="TextBlock"><Setter Property="Foreground" Value="#111216" /></Style>
-            </ComboBox.Resources>
-        </ComboBox>
+                  xmlns:automation="clr-namespace:System.Windows.Automation;assembly=PresentationCore" />
         <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button Content="Cancel" Margin="0,0,8,0" IsCancel="True" />
             <Button Style="{StaticResource PrimaryButton}" Content="Scan folder" IsDefault="True" Click="Confirm" />

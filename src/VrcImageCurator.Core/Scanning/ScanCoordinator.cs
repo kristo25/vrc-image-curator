@@ -1,3 +1,4 @@
+using VrcImageCurator.Core.Atlas;
 using VrcImageCurator.Core.FileSystem;
 using VrcImageCurator.Core.Imaging;
 using VrcImageCurator.Core.Models;
@@ -12,7 +13,8 @@ public sealed record CategoryScanResult(
     int HeldForReview,
     int Skipped,
     IReadOnlyList<string> Errors,
-    int AutoKeptArchived = 0);
+    int AutoKeptArchived = 0,
+    int Animated = 0);
 
 /// <summary><see cref="Activity"/> and <see cref="FileName"/> describe what the scan is doing
 /// right now, so the UI can say more than a bare count.</summary>
@@ -54,6 +56,7 @@ public sealed class ScanCoordinator
     private readonly TimeProvider _timeProvider;
     private readonly TimeSpan _settleDelay;
     private readonly SemaphoreSlim _scanGate = new(1, 1);
+    private readonly AtlasAnimationWriter _animationWriter = new();
 
     public ScanCoordinator(
         JsonStateStore stateStore,
@@ -405,11 +408,30 @@ public sealed class ScanCoordinator
         // reason to abort the category.
         var errors = new List<string>(
             indexResult.SkippedFiles.Select(skipped => $"Archive file skipped - {skipped}"));
+
+        // A sheet whose pixels disagree with its name is worth saying out loud, but it is not a
+        // failure: the export did exactly what it was asked to. Kept apart from the errors so it
+        // lands in the history as information rather than raising "scan completed with warnings"
+        // over a sheet that animated perfectly well.
+        var notes = new List<string>();
         var examined = 0;
         var moved = 0;
         var held = 0;
         var autoKept = 0;
         var skipped = 0;
+
+        // Sheets already in the archive were archived before this existed, so animating only what
+        // a scan newly archives would leave the whole existing archive untouched. This fills in
+        // whatever is missing, which also means a deleted animation comes back on the next scan.
+        // A sheet whose pixels contradict its name is left for the Animations tab rather than
+        // reported here, or it would warn on every scan forever.
+        var animated = await AnimateArchivedSheetsAsync(
+                category,
+                mapping.ArchivePath,
+                errors,
+                notes,
+                cancellationToken)
+            .ConfigureAwait(false);
         var paths = sourceSnapshot.Paths;
         skipped = sourceSnapshot.UnsupportedFiles;
         var settledPaths = await FindSettledPathsAsync(paths, cancellationToken).ConfigureAwait(false);
@@ -423,7 +445,7 @@ public sealed class ScanCoordinator
         // removed from the index, so keying on it rebuilds exactly when the archive changed - and
         // that includes an image archived earlier in this same scan.
         var candidateGeneration = -1L;
-        var candidates = Array.Empty<ImageCandidate>();
+        var indexedCandidates = Array.Empty<ImageCandidate>();
         var indexedByKey = new Dictionary<string, IndexedImageRecord>(StringComparer.Ordinal);
 
         // Reading runs ahead of routing by up to MaximumConcurrentReads images. Reads produce a
@@ -508,9 +530,11 @@ public sealed class ScanCoordinator
                     continue;
                 }
 
+                // Rebuilt only when the index has actually moved on. Reading every archived
+                // fingerprint back for every incoming image is what made a large archive crawl.
                 if (candidateGeneration != index.Generation)
                 {
-                    candidates = index.Images
+                    indexedCandidates = index.Images
                         .Where(item => item.Fingerprint is not null)
                         .Select(item => new ImageCandidate(item.Id.ToString("N"), item.Fingerprint!))
                         .ToArray();
@@ -519,6 +543,39 @@ public sealed class ScanCoordinator
                         item => item,
                         StringComparer.Ordinal);
                     candidateGeneration = index.Generation;
+                }
+
+                // Everything this incoming image may be compared against. Normally that is the
+                // index alone, and the cached view above is used exactly as it stands. A ready-made
+                // GIF is also compared against the animation the archive's own sheet produces -
+                // generated now if it has never been made - and that companion belongs to this one
+                // file, so it goes into a copy rather than into the cache every other image reads.
+                var comparable = indexedByKey;
+                var candidates = indexedCandidates;
+                if (AtlasAnimationWriter.IsAnimation(path))
+                {
+                    var companion = await BuildCompanionAnimationAsync(
+                            index,
+                            path,
+                            mapping.ArchivePath,
+                            errors,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    if (companion is not null)
+                    {
+                        var companionKey = companion.Id.ToString("N");
+                        comparable = new Dictionary<string, IndexedImageRecord>(
+                            indexedByKey,
+                            StringComparer.Ordinal)
+                        {
+                            [companionKey] = companion,
+                        };
+                        if (companion.Fingerprint is not null)
+                        {
+                            candidates =
+                                [.. indexedCandidates, new ImageCandidate(companionKey, companion.Fingerprint)];
+                        }
+                    }
                 }
 
                 var matches = ImageMatcher.RankCandidates(
@@ -534,7 +591,7 @@ public sealed class ScanCoordinator
                     IndexedImageRecord? duplicate = null;
                     foreach (var match in matches)
                     {
-                        var indexed = indexedByKey[match.CandidateKey];
+                        var indexed = comparable[match.CandidateKey];
                         if (indexed.Fingerprint is not null
                             && ImageMatcher.IsSamePicture(match, fingerprint, indexed.Fingerprint))
                         {
@@ -587,7 +644,7 @@ public sealed class ScanCoordinator
                         Candidates = matches.Select(
                                 match =>
                                 {
-                                    var indexed = indexedByKey[match.CandidateKey];
+                                    var indexed = comparable[match.CandidateKey];
                                     return new ReviewCandidate
                                     {
                                         Id = Guid.NewGuid(),
@@ -617,7 +674,7 @@ public sealed class ScanCoordinator
                     continue;
                 }
 
-                await _router.MoveUniqueAsync(
+                var route = await _router.MoveUniqueAsync(
                         path,
                         category,
                         fingerprint,
@@ -626,6 +683,56 @@ public sealed class ScanCoordinator
                     .ConfigureAwait(false);
                 moved++;
                 outcome = "Archived as unique";
+
+                // VRChat writes the frame count, rate and loop direction into the name of an
+                // animated emoji, so a sheet identifies itself and needs no detection. The image
+                // is already archived safely by this point, so a failure to animate it is a
+                // warning on the scan rather than a failure of the image.
+                if (route.DestinationPath is { } archivedPath)
+                {
+                    // An animation may already be sitting there - VRCX hands over ready-made GIFs
+                    // for some emoji, and one that arrived earlier is archived under exactly the
+                    // name this sheet's export would take. Writing over it would destroy an
+                    // archived file and leave the index describing pixels that no longer exist, so
+                    // the existing animation is adopted instead. Re-exporting from the Animations
+                    // tab still overwrites, because there a person has asked for it.
+                    var animation = await AnimateOrAdoptAsync(
+                            archivedPath,
+                            mapping.ArchivePath,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    if (animation.Exported)
+                    {
+                        animated++;
+                        outcome = "Archived as unique, animated";
+
+                        // Said out loud rather than swallowed. The sheet was animated to its name
+                        // and then filed away as finished, so the history is the only place a
+                        // person would ever hear what the export made of it.
+                        if (animation.Note is { } exportNote)
+                        {
+                            notes.Add($"{archivedPath}: {exportNote}");
+                        }
+
+                        // The sheet has served its purpose as a still, so it is filed with the
+                        // animation rather than left among the images a person browses. Only a
+                        // sheet that actually produced a GIF moves: one still waiting on review is
+                        // unfinished work and stays where it can be seen.
+                        await FileAnimatedSheetAsync(
+                                route,
+                                archivedPath,
+                                category,
+                                fingerprint,
+                                mapping.ArchivePath,
+                                errors,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    else if (animation.Warning is { } warning)
+                    {
+                        errors.Add($"{archivedPath}: {warning}");
+                    }
+                }
             }
             catch (Exception exception) when (
                 exception is IOException
@@ -651,6 +758,20 @@ public sealed class ScanCoordinator
         await _stateStore.UpdateAsync(
                 state =>
                 {
+                    foreach (var note in notes)
+                    {
+                        state.History.Add(new ActivityEntry
+                        {
+                            Id = Guid.NewGuid(),
+                            OccurredUtc = _timeProvider.GetUtcNow(),
+                            Kind = ActivityKind.Scan,
+                            Level = ActivityLevel.Information,
+                            Category = category,
+                            Message = note,
+                            SourcePath = sourceRoot,
+                        });
+                    }
+
                     state.History.Add(new ActivityEntry
                     {
                         Id = Guid.NewGuid(),
@@ -658,14 +779,310 @@ public sealed class ScanCoordinator
                         Kind = ActivityKind.Scan,
                         Level = errors.Count == 0 ? ActivityLevel.Information : ActivityLevel.Warning,
                         Category = category,
-                        Message = $"Scanned {sourceRoot}: {examined} examined, {moved} moved, {autoKept} exact duplicates recycled, {held} queued, {skipped} skipped, {errors.Count} failed.",
+                        Message = $"Scanned {sourceRoot}: {examined} examined, {moved} moved, {animated} animated, {autoKept} exact duplicates recycled, {held} queued, {skipped} skipped, {errors.Count} failed.",
                         SourcePath = sourceRoot,
                     });
                     return true;
                 },
                 cancellationToken).ConfigureAwait(false);
 
-        return new CategoryScanResult(category, examined, moved, held, skipped, errors, autoKept);
+        return new CategoryScanResult(category, examined, moved, held, skipped, errors, autoKept, animated);
+    }
+
+    /// <summary>
+    /// Makes the animation for a freshly archived sheet, unless one already stands in its place.
+    /// </summary>
+    /// <remarks>
+    /// The existing file is only adopted when it really is this sheet's animation, checked by frame
+    /// count. Two different emoji can carry the same file name - the archive root disambiguates
+    /// them, but the animation folder is reached by name alone - and adopting a stranger's GIF
+    /// would leave this sheet reported as animated while no animation of it exists anywhere.
+    /// </remarks>
+    private async Task<AtlasAnimationResult> AnimateOrAdoptAsync(
+        string archivedPath,
+        string archiveRoot,
+        CancellationToken cancellationToken)
+    {
+        if (!EmojiAtlasName.TryParse(archivedPath, out var name))
+        {
+            return AtlasAnimationResult.NotASheet;
+        }
+
+        try
+        {
+            var destination = AtlasAnimationWriter.BuildDestination(archivedPath, archiveRoot);
+            if (File.Exists(destination))
+            {
+                return await AdoptAsync(destination, name, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            // Fall through and let the writer report the failure in its own words.
+        }
+
+        return await _animationWriter
+            .TryWriteAsync(archivedPath, archiveRoot, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Accepts the animation already sitting where this sheet's own would go, if it plays the
+    /// number of frames this sheet's name promises.
+    /// </summary>
+    private async Task<AtlasAnimationResult> AdoptAsync(
+        string destination,
+        EmojiAtlasName name,
+        CancellationToken cancellationToken)
+    {
+        var decoded = await _decoder.DecodeAsync(destination, cancellationToken).ConfigureAwait(false);
+        if (!decoded.IsSuccess)
+        {
+            return new AtlasAnimationResult(
+                false,
+                null,
+                $"an animation already sits at {destination} but could not be read, so this sheet was left alone.");
+        }
+
+        // Ping-pong plays out and back without repeating either end, so 4 frames play as 6.
+        var played = name.LoopStyle == AtlasLoopStyle.PingPong && name.FrameCount > 2
+            ? (name.FrameCount * 2) - 2
+            : name.FrameCount;
+        if (decoded.Image!.Frames.Count != played)
+        {
+            return new AtlasAnimationResult(
+                false,
+                null,
+                $"a different animation already sits at {destination} - it plays "
+                    + $"{decoded.Image!.Frames.Count} frames where this sheet promises {played} - so this "
+                    + "sheet was left alone rather than being reported as animated.");
+        }
+
+        return new AtlasAnimationResult(true, destination, null);
+    }
+
+    /// <summary>
+    /// The animation the archive's own sheet produces for an incoming GIF, so the two can be
+    /// compared, or null when the archive holds no sheet for it.
+    /// </summary>
+    /// <remarks>
+    /// A ready-made GIF and a sheet are never alike as pixels - one is a frame playing, the other a
+    /// grid of every frame - so comparing them directly would always say "different" and archive
+    /// both. What can be compared is animation against animation, and the sheet can produce one.
+    /// So the sheet's own GIF is made first, if it does not exist yet, and the incoming file is
+    /// judged against that by exactly the same rules as any other pair of images: identical means
+    /// the archived one wins and the incoming copy is recycled, anything short of identical goes to
+    /// review.
+    /// The record handed back is not written to the index. The next scan indexes the generated file
+    /// properly; this one only needs something to hold the fingerprint while the decision is made.
+    /// </remarks>
+    private async Task<IndexedImageRecord?> BuildCompanionAnimationAsync(
+        CategoryIndexState index,
+        string incomingAnimationPath,
+        string archiveRoot,
+        List<string> errors,
+        CancellationToken cancellationToken)
+    {
+        var sheet = index.Images.FirstOrDefault(
+            item => AtlasAnimationWriter.IsAnimationOf(incomingAnimationPath, item.Path));
+        if (sheet is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var companionPath = AtlasAnimationWriter.BuildDestination(sheet.Path, archiveRoot);
+
+            // Animations are indexed, so the sheet's own is usually already a candidate. Adding a
+            // second record for the same file would put two rows with one path into the review,
+            // one of them carrying an id the index has never heard of.
+            if (index.Images.Any(item => string.Equals(item.Path, companionPath, StringComparison.OrdinalIgnoreCase)))
+            {
+                return null;
+            }
+
+            if (!File.Exists(companionPath))
+            {
+                var written = await _animationWriter
+                    .TryWriteAsync(sheet.Path, archiveRoot, cancellationToken)
+                    .ConfigureAwait(false);
+                if (!written.Exported)
+                {
+                    // The sheet cannot be animated, so there is nothing to compare against and the
+                    // incoming GIF is the only copy of this animation there is. Let it through.
+                    return null;
+                }
+
+                companionPath = written.Path ?? companionPath;
+            }
+
+            var decoded = await _decoder.DecodeAsync(companionPath, cancellationToken).ConfigureAwait(false);
+            if (!decoded.IsSuccess)
+            {
+                return null;
+            }
+
+            var fingerprint = ImageFingerprint.Create(decoded.Image!);
+            var info = new FileInfo(companionPath);
+            return new IndexedImageRecord
+            {
+                Id = Guid.NewGuid(),
+                Category = sheet.Category,
+                Path = companionPath,
+                FileSize = info.Length,
+                LastWriteUtc = info.LastWriteTimeUtc,
+                Width = decoded.Image!.Width,
+                Height = decoded.Image!.Height,
+                ExactFingerprint = fingerprint.ExactIdentity,
+                PerceptualFingerprint = fingerprint.PerceptualFrames[0].DifferenceHash,
+                Fingerprint = fingerprint,
+            };
+        }
+        catch (Exception exception) when (
+            exception is IOException
+                or UnauthorizedAccessException
+                or InvalidDataException
+                or InvalidOperationException
+                or NotSupportedException
+                or ArgumentException)
+        {
+            errors.Add($"{incomingAnimationPath}: could not be compared against its sheet ({exception.Message}).");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Moves a freshly animated sheet into the reference folder beside its animation.
+    /// </summary>
+    /// <remarks>
+    /// A failure here is reported and nothing else: the image is archived, the animation is
+    /// written, and the only cost of the sheet staying where it is is that it sits among the
+    /// stills. Turning that into a failed scan would be out of proportion to it.
+    /// </remarks>
+    private async Task FileAnimatedSheetAsync(
+        FileRouteResult route,
+        string archivedPath,
+        VrcImageCategory category,
+        ImageFingerprint fingerprint,
+        string archiveRoot,
+        List<string> errors,
+        CancellationToken cancellationToken)
+    {
+        if (route.IndexedImageId is not { } indexedImageId)
+        {
+            return;
+        }
+
+        try
+        {
+            var reference = AtlasAnimationWriter.BuildReferenceDestination(archivedPath, archiveRoot);
+
+            // Two different sheets can carry the same file name - the archive root disambiguates
+            // them, but the first one filed vacates that name, so the second arrives thinking it is
+            // unique. Moving onto an existing file throws inside the journal and leaves an entry
+            // that reconciliation can never settle, so the collision is caught out here instead and
+            // the sheet simply stays where it is.
+            if (File.Exists(reference))
+            {
+                errors.Add(
+                    $"{archivedPath}: animated, but a different sheet of the same name is already "
+                    + "filed with its animation, so this one was left in place.");
+                return;
+            }
+
+            await _router
+                .FileAnimatedSheetAsync(
+                    indexedImageId,
+                    archivedPath,
+                    reference,
+                    category,
+                    fingerprint,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (
+            exception is IOException
+                or UnauthorizedAccessException
+                or InvalidOperationException
+                or NotSupportedException
+                or ArgumentException)
+        {
+            errors.Add($"{archivedPath}: animated, but could not be filed with its animation ({exception.Message}).");
+        }
+    }
+
+    /// <summary>
+    /// Writes the missing animations for sheets that were archived before the app could make them.
+    /// </summary>
+    /// <remarks>
+    /// This one only ever adds files. Sheets it animates keep their place in the archive rather
+    /// than being filed into the reference folder, because rearranging an archive a person has
+    /// already organised is theirs to decide, not a side effect of a scan. Only sheets arriving
+    /// from here on are filed.
+    /// </remarks>
+    private async Task<int> AnimateArchivedSheetsAsync(
+        VrcImageCategory category,
+        string archiveRoot,
+        List<string> errors,
+        List<string> notes,
+        CancellationToken cancellationToken)
+    {
+        var state = await _stateStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+        var index = state.ArchiveIndex.Categories.Single(item => item.Category == category);
+        var skipped = new HashSet<string>(state.SkippedAnimations, StringComparer.OrdinalIgnoreCase);
+        var written = 0;
+        foreach (var image in index.Images)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!EmojiAtlasName.TryParse(image.Path, out _))
+            {
+                continue;
+            }
+
+            // A skipped sheet is one a person has already looked at and decided against. Without
+            // this it would be decoded in full on every single scan forever: a sheet that cannot
+            // be animated never produces the file whose absence is what puts it back on the list.
+            if (skipped.Contains(image.ExactFingerprint))
+            {
+                continue;
+            }
+
+            string destination;
+            try
+            {
+                destination = AtlasAnimationWriter.BuildDestination(image.Path, archiveRoot);
+                if (File.Exists(destination))
+                {
+                    continue;
+                }
+            }
+            catch (Exception exception) when (
+                exception is ArgumentException or IOException or UnauthorizedAccessException)
+            {
+                errors.Add($"{image.Path}: could not be animated ({exception.Message})");
+                continue;
+            }
+
+            var animation = await _animationWriter
+                .TryWriteAsync(image.Path, archiveRoot, cancellationToken)
+                .ConfigureAwait(false);
+            if (animation.Exported)
+            {
+                written++;
+                if (animation.Note is { } note)
+                {
+                    notes.Add($"{image.Path}: {note}");
+                }
+            }
+            else if (animation.Warning is { } warning)
+            {
+                errors.Add($"{image.Path}: {warning}");
+            }
+        }
+
+        return written;
     }
 
     private static SourceSnapshot CreateSourceSnapshotSafe(string sourceRoot)

@@ -625,6 +625,88 @@ public sealed class FileRouterTests
         Assert.Equal(IndexStatus.Stale, state.ArchiveIndex.Categories[0].Status);
     }
 
+    [Theory]
+    [InlineData(OrganizationPolicy.CategoryRoot, "")]
+    [InlineData(OrganizationPolicy.PreserveIncomingRelativeFolder, "2026-09")]
+    public async Task TheArchiveFolderFollowsTheOrganizationPolicy(OrganizationPolicy policy, string expectedBranch)
+    {
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        var incomingFolder = Path.Combine(sourceRoot, "2026-09");
+        Directory.CreateDirectory(incomingFolder);
+        Directory.CreateDirectory(archiveRoot);
+        var incoming = Path.Combine(incomingFolder, "emoji.png");
+        using (var image = ImageFixtureFactory.CreatePattern(61))
+        {
+            await image.SaveAsPngAsync(incoming);
+        }
+
+        using var store = CreateStore(directory, sourceRoot, archiveRoot);
+        await store.UpdateAsync(state =>
+        {
+            state.Settings.OrganizationPolicy = policy;
+            return true;
+        });
+        var router = new FileRouter(store, new ImageDecoder(), new FakeRecycleBinService());
+
+        var result = await router.MoveUniqueAsync(
+            incoming,
+            VrcImageCategory.Emoji,
+            Fingerprint(61),
+            new ScanRoutingContext
+            {
+                SourceRootPath = sourceRoot,
+                RelativeDirectory = "2026-09",
+                OutputRootPath = Path.GetDirectoryName(archiveRoot)!,
+            });
+
+        var expected = string.IsNullOrEmpty(expectedBranch)
+            ? Path.Combine(archiveRoot, "emoji.png")
+            : Path.Combine(archiveRoot, expectedBranch, "emoji.png");
+        Assert.Equal(expected, result.DestinationPath);
+        Assert.True(File.Exists(expected));
+    }
+
+    [Fact]
+    public async Task ArchivingFollowsTheOutputFolderSetNowRatherThanTheOneTheScanSaw()
+    {
+        // A review can sit in the queue while the output folder is changed under it. Its stored
+        // routing context still names the old root, and honouring that filed the image into the
+        // folder the person had just stopped using - while the availability check, which reads the
+        // current mapping, was guarding a folder nothing was written to.
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        var abandonedRoot = directory.GetPath("old-archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        Directory.CreateDirectory(abandonedRoot);
+        var incoming = Path.Combine(sourceRoot, "emoji.png");
+        using (var image = ImageFixtureFactory.CreatePattern(62))
+        {
+            await image.SaveAsPngAsync(incoming);
+        }
+
+        using var store = CreateStore(directory, sourceRoot, archiveRoot);
+        var router = new FileRouter(store, new ImageDecoder(), new FakeRecycleBinService());
+
+        var result = await router.MoveUniqueAsync(
+            incoming,
+            VrcImageCategory.Emoji,
+            Fingerprint(62),
+            new ScanRoutingContext
+            {
+                SourceRootPath = sourceRoot,
+                RelativeDirectory = string.Empty,
+                OutputRootPath = directory.GetPath("old-archive"),
+            });
+
+        Assert.Equal(Path.Combine(archiveRoot, "emoji.png"), result.DestinationPath);
+        Assert.True(File.Exists(Path.Combine(archiveRoot, "emoji.png")));
+        Assert.Empty(Directory.GetFiles(abandonedRoot));
+    }
+
     internal static JsonStateStore CreateStore(
         TestDirectory directory,
         string sourceRoot,

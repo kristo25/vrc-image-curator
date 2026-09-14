@@ -1,8 +1,12 @@
+using System.Globalization;
 using System.IO;
 using System.Windows;
 using System.Windows.Automation.Peers;
 using Microsoft.Win32;
+using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using VrcImageCurator.App.Services;
+using VrcImageCurator.Core.Atlas;
 using VrcImageCurator.Core.FileSystem;
 using VrcImageCurator.Core.Imaging;
 using VrcImageCurator.Core.Models;
@@ -17,6 +21,7 @@ public partial class MainWindow : Window
     private readonly AppRuntime _runtime;
     private readonly PreviewService _previewService = new();
     private readonly LatestRequestGuard _reviewDisplayRequests = new();
+    private readonly KeepIncomingPrompt _keepIncomingPrompt = new();
     private bool _busy;
     private bool _loadingSettings;
     private CancellationTokenSource? _operationCancellation;
@@ -29,6 +34,7 @@ public partial class MainWindow : Window
         _runtime = runtime ?? throw new ArgumentNullException(nameof(runtime));
         InitializeComponent();
         SimilarityCombo.ItemsSource = Enum.GetValues<SimilarityProfile>();
+        OrganizationCombo.ItemsSource = Enum.GetValues<OrganizationPolicy>();
         WatchModeCombo.ItemsSource = Enum.GetValues<WatchMode>();
     }
 
@@ -133,6 +139,7 @@ public partial class MainWindow : Window
             OutputRoot.Text = settings.OutputRootPath;
             UpdateResolvedDestinations(settings.OutputRootPath);
             SimilarityCombo.SelectedItem = settings.SimilarityProfile;
+            OrganizationCombo.SelectedItem = settings.OrganizationPolicy;
             StartWithWindowsCheck.IsChecked = settings.Automation.StartWithWindows;
             StartWithWindowsCheck.IsEnabled = _runtime.AllowStartupRegistration;
             BringReviewForwardCheck.IsChecked = settings.BringReviewForwardWhenHeld;
@@ -483,18 +490,26 @@ public partial class MainWindow : Window
                     return;
                 }
 
+                // Asked once per review, not once per match. Settling a review with several
+                // matches takes one press each, and putting the same question behind every one of
+                // them only makes a person dismiss dialogs they have already answered.
                 var canRecycle = _runtime.Router.CanRecycle(candidate.ArchivePath);
-                if (MessageBox.Show(
-                        this,
-                        canRecycle
-                            ? "Recycle this archived match and keep the incoming image? If other matches remain, the review will stay open."
-                            : "Windows Recycle Bin is unavailable for this archive drive. Move the archived match into the VRC Image Curator Replaced folder and keep the incoming image?",
-                        "Keep incoming",
-                        MessageBoxButton.OKCancel,
-                        MessageBoxImage.Warning) != MessageBoxResult.OK)
+                if (_keepIncomingPrompt.MustAsk(review.Id, canRecycle))
                 {
-                    SetStatus("Keep incoming canceled.");
-                    return;
+                    if (MessageBox.Show(
+                            this,
+                            canRecycle
+                                ? "Recycle this archived match and keep the incoming image? If other matches remain, the review stays open and keeping the incoming over them will not ask again."
+                                : "Windows Recycle Bin is unavailable for this archive drive. Move the archived match into the VRC Image Curator Replaced folder and keep the incoming image? If other matches on this drive remain, they will not ask again.",
+                            "Keep incoming",
+                            MessageBoxButton.OKCancel,
+                            MessageBoxImage.Warning) != MessageBoxResult.OK)
+                    {
+                        SetStatus("Keep incoming canceled.");
+                        return;
+                    }
+
+                    _keepIncomingPrompt.Agreed(review.Id, canRecycle);
                 }
 
                 KeepIncomingResult result;
@@ -506,6 +521,11 @@ public partial class MainWindow : Window
                 {
                     await RefreshAsync();
                     throw;
+                }
+
+                if (result.ReviewResolved)
+                {
+                    _keepIncomingPrompt.Forget();
                 }
 
                 await RefreshAsync(result.ReviewResolved ? null : review.Id);
@@ -947,7 +967,8 @@ public partial class MainWindow : Window
             StartWithWindowsCheck.IsChecked == true,
             BringReviewForwardCheck.IsChecked == true,
             ParseWatchScanSeconds(WatchScanSeconds.Text),
-            (WatchMode?)WatchModeCombo.SelectedItem ?? WatchMode.OnDetection);
+            (WatchMode?)WatchModeCombo.SelectedItem ?? WatchMode.OnDetection,
+            (OrganizationPolicy?)OrganizationCombo.SelectedItem ?? OrganizationPolicy.CategoryRoot);
     }
 
     private static int ParseWatchScanSeconds(string? text) =>
@@ -1230,6 +1251,12 @@ public partial class MainWindow : Window
 
     private void ShowReviewPage(object sender, RoutedEventArgs e) => ShowPage(ReviewPage);
 
+    private async void ShowAnimationsPage(object sender, RoutedEventArgs e)
+    {
+        ShowPage(AnimationsPage);
+        await RefreshAnimationsAsync();
+    }
+
     private void ShowHistoryPage(object sender, RoutedEventArgs e) => ShowPage(HistoryPage);
 
     private void ShowSettingsPage(object sender, RoutedEventArgs e) => ShowPage(SettingsPage);
@@ -1237,19 +1264,28 @@ public partial class MainWindow : Window
     private void ShowPage(UIElement page)
     {
         ReviewPage.Visibility = page == ReviewPage ? Visibility.Visible : Visibility.Collapsed;
+        AnimationsPage.Visibility = page == AnimationsPage ? Visibility.Visible : Visibility.Collapsed;
         HistoryPage.Visibility = page == HistoryPage ? Visibility.Visible : Visibility.Collapsed;
         SettingsPage.Visibility = page == SettingsPage ? Visibility.Visible : Visibility.Collapsed;
         ReviewNavButton.SetValue(System.Windows.Automation.AutomationProperties.ItemStatusProperty, page == ReviewPage ? "Current page" : string.Empty);
+        AnimationsNavButton.SetValue(System.Windows.Automation.AutomationProperties.ItemStatusProperty, page == AnimationsPage ? "Current page" : string.Empty);
         HistoryNavButton.SetValue(System.Windows.Automation.AutomationProperties.ItemStatusProperty, page == HistoryPage ? "Current page" : string.Empty);
         SettingsNavButton.SetValue(System.Windows.Automation.AutomationProperties.ItemStatusProperty, page == SettingsPage ? "Current page" : string.Empty);
+
+        if (page != AnimationsPage)
+        {
+            StopAnimationPreview();
+        }
 
         if (IsLoaded)
         {
             _ = page == ReviewPage
                 ? ReviewHeading.Focus()
-                : page == HistoryPage
-                    ? HistoryHeading.Focus()
-                    : SettingsHeading.Focus();
+                : page == AnimationsPage
+                    ? AnimationsHeading.Focus()
+                    : page == HistoryPage
+                        ? HistoryHeading.Focus()
+                        : SettingsHeading.Focus();
         }
     }
 
@@ -1435,5 +1471,578 @@ public partial class MainWindow : Window
     {
         _previewService.Dispose();
         base.OnClosed(e);
+    }
+
+    // --- Animated emoji -------------------------------------------------------------------
+    //
+    // The preview animates the atlas itself rather than the exported GIF: cropping a cell per
+    // frame needs nothing but WPF, shows the animation before any file exists, and updates the
+    // moment a correction is typed.
+
+    private AtlasAnimationCatalog? _animationCatalog;
+    private DispatcherTimer? _animationTimer;
+    private BitmapSource? _animationSource;
+    private IReadOnlyList<int> _animationOrder = [];
+    private AtlasLayout? _animationLayout;
+    private int _animationFrame;
+    private AtlasInspection? _animationInspection;
+    private readonly List<System.Windows.Controls.Border> _animationCells = [];
+    private readonly List<System.Windows.Media.Brush?> _animationRestingBrushes = [];
+    private int _animationInspectionRequest;
+    private int _animationHighlighted = -1;
+
+    private AtlasAnimationCatalog AnimationCatalog =>
+        _animationCatalog ??= new AtlasAnimationCatalog(_runtime.StateStore);
+
+    private async Task RefreshAnimationsAsync()
+    {
+        try
+        {
+            var sheets = await AnimationCatalog.ListAsync();
+            var selectedPath = (SheetList.SelectedItem as ArchivedSheet)?.AtlasPath;
+            var waiting = sheets.Count(sheet => sheet.NeedsDecision);
+            var skipped = sheets.Count(sheet => sheet.IsSkipped);
+
+            // Anything the app could work out for itself has already been exported, and anything a
+            // person has skipped is settled too. What is left is the queue: sheets whose pixels did
+            // not agree with their name. The two tickboxes bring the settled ones back into view.
+            var showExported = ShowExportedCheck.IsChecked == true;
+            var showSkipped = ShowSkippedCheck.IsChecked == true;
+            var listed = sheets
+                .Where(sheet => sheet.NeedsDecision
+                    || (showExported && sheet.HasAnimation)
+                    || (showSkipped && sheet.IsSkipped))
+                .ToArray();
+            SheetList.ItemsSource = listed;
+            ExportMissingButton.IsEnabled = waiting > 0;
+            ExportMissingButton.Content = waiting > 0 ? $"Export {waiting} missing" : "All exported";
+            ClearAnimationQueueButton.IsEnabled = waiting > 0;
+            AnimationsSubtitle.Text = sheets.Count == 0
+                ? "No animated emoji in the archive yet. They appear here once a scan has indexed them."
+                : waiting == 0
+                    ? $"Nothing waiting. {sheets.Count - skipped} of {sheets.Count} exported"
+                        + (skipped == 0 ? "." : $", {skipped} skipped.")
+                    : $"{waiting} of {sheets.Count} animated emoji have not been exported yet. Export them, "
+                        + "or correct the frames, rate or loop below first if a name looks wrong - "
+                        + "and skip the ones you do not want.";
+
+            // Restored from what is actually on the list. Looking it up in the full set instead
+            // would hand the box a sheet the filter has hidden, which it answers by selecting
+            // nothing at all - the same outcome, arrived at by accident rather than on purpose.
+            if (selectedPath is not null)
+            {
+                SheetList.SelectedItem = listed.FirstOrDefault(
+                    sheet => string.Equals(sheet.AtlasPath, selectedPath, StringComparison.OrdinalIgnoreCase));
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            AnimationsSubtitle.Text = $"The archive could not be read: {exception.Message}";
+        }
+    }
+
+    private async void AnimationFilterChanged(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        await RefreshAnimationsAsync();
+    }
+
+    private async void SheetSelected(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        StopAnimationPreview();
+        if (SheetList.SelectedItem is not ArchivedSheet sheet)
+        {
+            SheetTitle.Text = "Select an emoji to preview";
+            SheetStatusText.Text = string.Empty;
+            ExportSheetButton.IsEnabled = false;
+            SkipSheetButton.IsEnabled = false;
+            SkipSheetButton.Content = "Skip";
+            SheetAtlasImage.Source = null;
+            SheetPreview.Source = null;
+            ClearCellOverlay();
+            return;
+        }
+
+        SkipSheetButton.IsEnabled = true;
+        SkipSheetButton.Content = sheet.IsSkipped ? "Unskip" : "Skip";
+        SheetTitle.Text = sheet.FileName;
+
+        // Everything measured about the previous sheet goes now, before anything new is drawn. Two
+        // sheets with the same frame count share a grid size, so a reading left over from the last
+        // one would pass every check and outline this one's cells with the other one's art.
+        ClearCellOverlay();
+        _animationLayout = null;
+        SheetPreview.Source = null;
+
+        // The sheet is loaded before the three boxes are filled in. Setting SheetLoop raises
+        // SelectionChanged synchronously, which starts a preview - and if that ran first it would
+        // run against the previous sheet's bitmap with this sheet's frame count.
+        try
+        {
+            var bitmap = new BitmapImage();
+            bitmap.BeginInit();
+            bitmap.CacheOption = BitmapCacheOption.OnLoad;
+            bitmap.UriSource = new Uri(sheet.AtlasPath);
+            bitmap.EndInit();
+            bitmap.Freeze();
+            _animationSource = bitmap;
+            SheetAtlasImage.Source = bitmap;
+            SheetAtlasHost.Width = bitmap.PixelWidth;
+            SheetAtlasHost.Height = bitmap.PixelHeight;
+        }
+
+        // FormatException is in the list because a truncated or corrupt image throws
+        // FileFormatException, which is one of those rather than an IOException. Escaping an async
+        // void handler reaches the dispatcher, so a half-written PNG in the archive would otherwise
+        // take the window down with it.
+        catch (Exception exception) when (
+            exception is IOException
+                or UnauthorizedAccessException
+                or NotSupportedException
+                or UriFormatException
+                or FormatException
+                or OverflowException)
+        {
+            StopAnimationPreview();
+            _animationSource = null;
+            SheetAtlasImage.Source = null;
+            ClearCellOverlay();
+            SheetStatusText.Text = $"This sheet could not be opened: {exception.Message}";
+            return;
+        }
+
+        SheetFrames.Text = sheet.Name.FrameCount.ToString(CultureInfo.InvariantCulture);
+        SheetRate.Text = sheet.Name.FramesPerSecond.ToString(CultureInfo.InvariantCulture);
+        SheetLoop.SelectedIndex = sheet.Name.LoopStyle == AtlasLoopStyle.PingPong ? 1 : 0;
+        ExportSheetButton.IsEnabled = true;
+
+        StartAnimationPreview();
+        await InspectSelectedSheetAsync(sheet, ++_animationInspectionRequest);
+    }
+
+    /// <summary>
+    /// Measures which cells of the selected sheet actually carry art, and says so when that count
+    /// differs from the one in the name.
+    /// </summary>
+    /// <remarks>
+    /// Only ever a remark. The name decides what gets animated; this exists so a disagreement is
+    /// visible rather than silent, and so the outlines drawn over the sheet are the same reading
+    /// the export acted on.
+    /// </remarks>
+    private async Task InspectSelectedSheetAsync(ArchivedSheet sheet, int request)
+    {
+        var path = sheet.AtlasPath;
+        var name = sheet.Name;
+        AtlasInspection? inspection;
+        try
+        {
+            inspection = await Task.Run(() => AtlasInspector.Inspect(path, name));
+        }
+        catch (Exception exception) when (
+            exception is IOException
+                or UnauthorizedAccessException
+                or SixLabors.ImageSharp.ImageFormatException
+                or InvalidOperationException
+                or NotSupportedException
+                or OutOfMemoryException)
+        {
+            // The preview above is already drawn from the same file, so a failure here costs the
+            // outlines and nothing else. Not worth interrupting a person over.
+            return;
+        }
+
+        // Only the newest request may speak. Selecting a sheet, moving away and coming back leaves
+        // two measurements in flight, and both would find that sheet selected when they landed -
+        // so keying on the selection alone let the same remark be appended twice.
+        if (request != _animationInspectionRequest || !ReferenceEquals(SheetList.SelectedItem, sheet))
+        {
+            return;
+        }
+
+        _animationInspection = inspection;
+        BuildCellOverlay();
+        if (inspection is { DisagreesWithTheName: true })
+        {
+            var beyond = inspection.FrameCountThatWouldFit > inspection.FrameCount;
+            SheetStatusText.Text +=
+                $" Heads up: art sits in {inspection.CellsWithContent} cells but the name counts "
+                + $"{inspection.FrameCount} frames. The name wins - "
+                + (beyond
+                    ? $"set Frames to {inspection.FrameCountThatWouldFit} if you want the rest included."
+                    : "the cells it does not reach are simply left out.");
+        }
+    }
+
+    private void SheetOverrideChanged(object sender, RoutedEventArgs e) => StartAnimationPreview();
+
+    private void SheetOverrideSelected(object sender, System.Windows.Controls.SelectionChangedEventArgs e) =>
+        StartAnimationPreview();
+
+    /// <summary>The values in the three boxes, which start as the ones VRChat put in the name.</summary>
+    private EmojiAtlasName? CurrentAnimationName()
+    {
+        if (!int.TryParse(SheetFrames.Text, out var frames)
+            || !int.TryParse(SheetRate.Text, out var rate)
+            || frames < EmojiAtlasName.MinimumFrameCount
+            || frames > EmojiAtlasName.MaximumFrameCount
+            || rate < 1
+            || rate > EmojiAtlasName.MaximumFramesPerSecond)
+        {
+            return null;
+        }
+
+        return new EmojiAtlasName(
+            frames,
+            rate,
+            SheetLoop.SelectedIndex == 1 ? AtlasLoopStyle.PingPong : AtlasLoopStyle.Linear);
+    }
+
+    private void StartAnimationPreview()
+    {
+        StopAnimationPreview();
+        if (_animationSource is not { } source || SheetList.SelectedItem is not ArchivedSheet sheet)
+        {
+            return;
+        }
+
+        var name = CurrentAnimationName();
+        if (name is null)
+        {
+            SheetStatusText.Text = "Frames and rate have to be whole numbers inside the supported range.";
+            ExportSheetButton.IsEnabled = false;
+            return;
+        }
+
+        if (!AtlasLayout.TryCreate(name.FrameCount, source.PixelWidth, source.PixelHeight, out var layout))
+        {
+            SheetStatusText.Text =
+                $"{name.FrameCount} frames do not divide a {source.PixelWidth}x{source.PixelHeight} sheet evenly.";
+            ExportSheetButton.IsEnabled = false;
+            return;
+        }
+
+        _animationLayout = layout;
+        _animationOrder = layout.PlaybackOrder(name.LoopStyle);
+        _animationFrame = 0;
+        ExportSheetButton.IsEnabled = true;
+        BuildCellOverlay();
+
+        var delay = AtlasGifExporter.FrameDelayFor(name.FramesPerSecond);
+        var effective = 100 / delay;
+        var rateNote = effective == name.FramesPerSecond
+            ? $"{name.FramesPerSecond} fps"
+            : $"{name.FramesPerSecond} fps, exported at {effective} - GIF cannot express the rest";
+        SheetStatusText.Text = sheet.HasAnimation
+            ? $"{layout.Columns}x{layout.Rows} grid, {name.FrameCount} frames, {rateNote}. Exported to {sheet.AnimationPath}"
+            : $"{layout.Columns}x{layout.Rows} grid, {name.FrameCount} frames, {rateNote}. Not exported yet.";
+
+        _animationTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(1.0 / Math.Max(1, name.FramesPerSecond)),
+        };
+        _animationTimer.Tick += AdvanceAnimationFrame;
+        _animationTimer.Start();
+        AdvanceAnimationFrame(this, EventArgs.Empty);
+    }
+
+    /// <summary>Outline colours for the grid drawn over the sheet.</summary>
+    /// <remarks>
+    /// Three states, because there are three things worth telling apart at a glance: the cells the
+    /// animation is built from, the one playing right now, and art the name does not count. A cell
+    /// that is simply empty gets no outline at all - drawing a box round nothing is noise.
+    /// </remarks>
+    // Fully qualified on purpose: this project sets both UseWPF and UseWindowsForms, so System.Drawing
+    // and System.Windows.Media are both in scope and a bare Brush or Color does not compile.
+    private static readonly System.Windows.Media.Brush FrameCellBrush =
+        Freeze(System.Windows.Media.Color.FromRgb(0xE5, 0x48, 0x4D));
+
+    private static readonly System.Windows.Media.Brush PlayingCellBrush =
+        Freeze(System.Windows.Media.Color.FromRgb(0xF5, 0xD9, 0x0A));
+
+    private static readonly System.Windows.Media.Brush ExtraCellBrush =
+        Freeze(System.Windows.Media.Color.FromRgb(0xF7, 0x6B, 0x15));
+
+    private static System.Windows.Media.Brush Freeze(System.Windows.Media.Color colour)
+    {
+        var brush = new System.Windows.Media.SolidColorBrush(colour);
+        brush.Freeze();
+        return brush;
+    }
+
+    private void ClearCellOverlay()
+    {
+        SheetCellOverlay.Children.Clear();
+        _animationCells.Clear();
+        _animationRestingBrushes.Clear();
+        _animationInspection = null;
+        _animationHighlighted = -1;
+    }
+
+    /// <summary>
+    /// Draws one outlined box per cell over the sheet, in the same grid the animation is cut from.
+    /// </summary>
+    /// <remarks>
+    /// The boxes sit in a UniformGrid the same pixel size as the sheet, inside the Viewbox that
+    /// scales it. Laying them out in the sheet's own coordinates rather than the control's is what
+    /// keeps an outline on its cell at every window size.
+    /// </remarks>
+    private void BuildCellOverlay()
+    {
+        SheetCellOverlay.Children.Clear();
+        _animationCells.Clear();
+        _animationRestingBrushes.Clear();
+        _animationHighlighted = -1;
+        if (_animationLayout is not { } layout)
+        {
+            return;
+        }
+
+        SheetCellOverlay.Rows = layout.Rows;
+        SheetCellOverlay.Columns = layout.Columns;
+        var thickness = Math.Max(1.0, Math.Min(layout.CellWidth, layout.CellHeight) / 40.0);
+        var cells = layout.Columns * layout.Rows;
+        for (var index = 0; index < cells; index++)
+        {
+            var isFrame = index < layout.FrameCount;
+            // Only trusted when it describes this very grid. Changing the frame count can change
+            // the grid under it, and an older reading would then outline the wrong squares.
+            var hasArt = _animationInspection is { } inspection
+                && inspection.Layout.Columns == layout.Columns
+                && inspection.Layout.Rows == layout.Rows
+                && index < inspection.Cells.Count
+                && inspection.Cells[index].HasContent;
+            var resting = isFrame ? FrameCellBrush : hasArt ? ExtraCellBrush : null;
+            var border = new System.Windows.Controls.Border
+            {
+                BorderThickness = new Thickness(isFrame || hasArt ? thickness : 0),
+                BorderBrush = resting,
+            };
+            _animationCells.Add(border);
+            _animationRestingBrushes.Add(resting);
+            SheetCellOverlay.Children.Add(border);
+        }
+    }
+
+    /// <summary>Moves the highlight to the cell the preview is showing.</summary>
+    private void HighlightCell(int index)
+    {
+        if (_animationHighlighted == index)
+        {
+            return;
+        }
+
+        // Put the previous cell back to the colour it was given when the grid was drawn, rather
+        // than working it out again here. Deriving it a second time is how the two ends drift
+        // apart, and the earlier attempt left a cell yellow whenever the derivation disagreed.
+        if (_animationHighlighted >= 0 && _animationHighlighted < _animationCells.Count)
+        {
+            _animationCells[_animationHighlighted].BorderBrush = _animationRestingBrushes[_animationHighlighted];
+        }
+
+        if (index >= 0 && index < _animationCells.Count)
+        {
+            _animationCells[index].BorderBrush = PlayingCellBrush;
+        }
+
+        _animationHighlighted = index;
+    }
+
+    private void AdvanceAnimationFrame(object? sender, EventArgs e)
+    {
+        if (_animationSource is not { } source || _animationLayout is not { } layout || _animationOrder.Count == 0)
+        {
+            return;
+        }
+
+        var index = _animationOrder[_animationFrame % _animationOrder.Count];
+        _animationFrame++;
+        var (x, y, width, height) = layout.GetFrame(index);
+        if (x + width > source.PixelWidth || y + height > source.PixelHeight)
+        {
+            StopAnimationPreview();
+            return;
+        }
+
+        SheetPreview.Source = new CroppedBitmap(source, new Int32Rect(x, y, width, height));
+        HighlightCell(index);
+    }
+
+    private void StopAnimationPreview()
+    {
+        if (_animationTimer is { } timer)
+        {
+            timer.Stop();
+            timer.Tick -= AdvanceAnimationFrame;
+            _animationTimer = null;
+        }
+    }
+
+    private async void ExportSelectedAnimation(object sender, RoutedEventArgs e)
+    {
+        if (SheetList.SelectedItem is not ArchivedSheet sheet || CurrentAnimationName() is not { } name)
+        {
+            return;
+        }
+
+        // The file about to be replaced may not be one the app made. A ready-made GIF from an
+        // incoming folder is archived at exactly this path and then adopted as the sheet's
+        // animation, and the exporter writes over whatever is there without a copy in the Recycle
+        // Bin. Re-exporting is a deliberate act, so it is allowed - but not silently.
+        if (sheet.HasAnimation
+            && MessageBox.Show(
+                $"Replace the existing animation?\n\n{sheet.AnimationPath}\n\nIf that file came from "
+                    + "your incoming folder rather than from this app, it will be overwritten and not "
+                    + "sent to the Recycle Bin.",
+                "Export GIF",
+                MessageBoxButton.OKCancel,
+                MessageBoxImage.Warning) != MessageBoxResult.OK)
+        {
+            return;
+        }
+
+        ExportSheetButton.IsEnabled = false;
+        AtlasAnimationResult result;
+        try
+        {
+            result = await AnimationCatalog.ExportAsync(sheet, name);
+        }
+        finally
+        {
+            ExportSheetButton.IsEnabled = true;
+        }
+
+        await RefreshAnimationsAsync();
+
+        // The answer is written after the refresh, not before it. A successful export takes the
+        // sheet off the list of ones still needing a decision, so the refresh clears the selection
+        // and with it everything written here - which looked exactly like a button that did
+        // nothing, whether the export had succeeded or failed.
+        SheetStatusText.Text = result.Exported
+            ? result.Note is null
+                ? $"Exported to {result.Path}"
+                : $"Exported to {result.Path} - {result.Note}"
+            : $"Not exported: {result.Warning ?? "this file is not a sheet."}";
+
+        if (result.Exported && SheetList.SelectedItem is null)
+        {
+            SheetTitle.Text = sheet.FileName;
+            SheetStatusText.Text += " It has left the list of emoji still needing a decision; "
+                + "tick Show exported to see it again.";
+        }
+    }
+
+    /// <summary>
+    /// Skips the selected sheet, or puts it back if it was already skipped.
+    /// </summary>
+    /// <remarks>
+    /// A skip only records a decision. The sheet, and any animation already made from it, are left
+    /// exactly where they are - this is a way to stop being asked about a sheet, not a way to throw
+    /// one away.
+    /// </remarks>
+    private async void SkipSelectedAnimation(object sender, RoutedEventArgs e)
+    {
+        if (SheetList.SelectedItem is not ArchivedSheet sheet)
+        {
+            return;
+        }
+
+        SkipSheetButton.IsEnabled = false;
+        try
+        {
+            if (sheet.IsSkipped)
+            {
+                await AnimationCatalog.RestoreAsync([sheet]);
+            }
+            else
+            {
+                await AnimationCatalog.SkipAsync([sheet]);
+            }
+        }
+        finally
+        {
+            SkipSheetButton.IsEnabled = true;
+        }
+
+        await RefreshAnimationsAsync();
+        SheetStatusText.Text = sheet.IsSkipped
+            ? $"{sheet.FileName} is back in the queue."
+            : $"{sheet.FileName} was skipped. Tick Show skipped to find it again.";
+    }
+
+    private async void ClearAnimationQueue(object sender, RoutedEventArgs e)
+    {
+        var waiting = (await AnimationCatalog.ListAsync()).Where(sheet => sheet.NeedsDecision).ToArray();
+        if (waiting.Length == 0)
+        {
+            return;
+        }
+
+        var confirmed = MessageBox.Show(
+            $"Skip all {waiting.Length} emoji still waiting on a decision?\n\nNothing is deleted or moved - "
+                + "they stop appearing in this list, and Show skipped brings them back.",
+            "Clear queue",
+            MessageBoxButton.OKCancel,
+            MessageBoxImage.Question);
+        if (confirmed != MessageBoxResult.OK)
+        {
+            return;
+        }
+
+        ClearAnimationQueueButton.IsEnabled = false;
+        int cleared;
+        try
+        {
+            cleared = await AnimationCatalog.SkipAsync(waiting);
+        }
+        finally
+        {
+            ClearAnimationQueueButton.IsEnabled = true;
+        }
+
+        await RefreshAnimationsAsync();
+        SheetStatusText.Text = $"Skipped {cleared} emoji. Tick Show skipped to find them again.";
+    }
+
+    private async void ExportMissingAnimations(object sender, RoutedEventArgs e)
+    {
+        ExportMissingButton.IsEnabled = false;
+        var exported = 0;
+        var failed = 0;
+        try
+        {
+            var sheets = await AnimationCatalog.ListAsync();
+            foreach (var sheet in sheets.Where(item => item.NeedsDecision))
+            {
+                ExportMissingButton.Content = $"Exporting {exported + failed + 1}...";
+                var result = await AnimationCatalog.ExportAsync(sheet, sheet.Name);
+                if (result.Exported)
+                {
+                    exported++;
+                }
+                else
+                {
+                    failed++;
+                }
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            AnimationsSubtitle.Text = $"The archive could not be read: {exception.Message}";
+        }
+        finally
+        {
+            ExportMissingButton.IsEnabled = true;
+        }
+
+        await RefreshAnimationsAsync();
+
+        // Written after the refresh for the same reason as the single export above.
+        SheetStatusText.Text = failed == 0
+            ? $"Exported {exported} animations."
+            : $"Exported {exported} animations, {failed} could not be exported.";
     }
 }
