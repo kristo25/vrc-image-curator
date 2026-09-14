@@ -1,6 +1,6 @@
 # VRC Image Curator
 
-VRC Image Curator is a local Windows tool for reviewing duplicate and similar images collected by VRCX. It scans the fixed `Emoji`, `Prints`, and `Stickers` categories, keeps unique images organized, and places possible matches in a persistent visual review queue.
+VRC Image Curator is a local Windows tool for reviewing duplicate and similar images collected by VRCX. It scans the fixed `Emoji`, `Prints`, and `Stickers` categories, keeps unique images organized, and places possible matches in a persistent visual review queue. It also turns animated emoji sheets into GIFs, using the frame count, rate, and loop direction VRChat writes into the file name. See *Animated emoji* below.
 
 ## Safety model
 
@@ -17,6 +17,7 @@ VRC Image Curator is a local Windows tool for reviewing duplicate and similar im
 - Interrupted moves and recycle requests are recorded in a durable operation journal and reconciled on restart.
 - Archive fingerprints are stored locally and reused when a file's path, size, and modification time are unchanged. Every scan refreshes additions, removals, and changed files before matching.
 - Settings save automatically when a field is committed. A source folder that does not exist yet is reported inline rather than refused, so a folder that appears later still works; only overlapping source and output folders block a save. Scanning creates the output folder on demand and never creates a source folder.
+- Animating a sheet only adds files. The sheet itself is kept and filed beside the GIF made from it, never deleted, and an existing animation is never overwritten by a sheet arriving later.
 - Tests use temporary folders and never access the configured VRCX or archive folders.
 
 ## Automatic duplicate resolution
@@ -38,6 +39,60 @@ Three deliberate limits on this:
 Recovering an automatically resolved image means restoring it from the Recycle Bin. Every one is
 recorded in **History**.
 
+## Animated emoji
+
+VRChat saves an animated emoji as a single sheet: one image holding every frame in a grid. The
+frame count, the rate, and the loop direction are recorded in the file name, like
+`..._64frames_16fps_linearloopStyle.png`. Those three numbers are what the animation follows, and
+the sheet is exported as a GIF from them.
+
+**The name decides.** Measured against 56 real sheets, the name was right on 55; the best reading
+of the pixels managed 43. So where the drawing on the sheet disagrees with what the name counts,
+the name still wins and the disagreement is reported rather than acted on. Refusing a good sheet
+was the more common mistake by a wide margin.
+
+Open **Animations** to see the sheets still waiting on a decision. Selecting one shows:
+
+- the sheet itself, with every cell the animation uses outlined, the cell playing now highlighted,
+  and any art the name does not count marked;
+- a preview of the GIF it will produce.
+
+The same measurement draws the outlines and drives the export, so the picture cannot disagree with
+what gets written.
+
+**Frames**, **Frames per second**, and **Loop** can each be corrected before exporting, for the
+occasional sheet whose name is wrong. **Export GIF** writes it; **Export missing** does every sheet
+that has no animation yet.
+
+**Skip** sets aside a sheet not worth animating. Nothing is moved or deleted - the sheet stops
+counting as work still to do, and stops being decoded on every scan. A skip is remembered by the
+image's fingerprint rather than its path, so it survives a rename, a move, and an index rebuild.
+*Show skipped* brings them back, *Clear queue* skips everything still waiting, and *Show exported*
+lists the ones already done.
+
+### Where the files go
+
+```text
+<output>\Emoji\Animated\<name>.gif          the animation
+<output>\Emoji\Animated\Gif Ref\<name>.png  the sheet it was cut from
+```
+
+The folder reads as the GIFs you browse and, one level down, the atlases they came from. Everything
+in it is indexed like any other archived image, so a second copy of an animation has something to
+be compared against.
+
+A ready-made GIF arriving in a source folder is filed with the animations and compared against
+them. One that matches a sheet already in the archive is compared against that sheet's own
+animation, generated for the comparison if it has not been made yet.
+
+### Two things to know
+
+- **The frame count comes from the name.** A sheet whose name overcounts exports blank frames; one
+  whose name undercounts leaves art out. The export says which of the two happened and records it
+  in **History**, and the count can be corrected by hand before exporting.
+- A sheet whose pixels disagree with its name is reported as information, not as a scan failure.
+  The scan still succeeded.
+
 ## Supported files
 
 PNG, animated GIF, JPG/JPEG, WebP, and BMP are supported. MP4, `.temp`, and unsupported files stay untouched.
@@ -51,8 +106,9 @@ PNG, animated GIF, JPG/JPEG, WebP, and BMP are supported. MP4, `.temp`, and unsu
 5. Settings save automatically as you change them. Select **Scan now** when you are ready; the output folder is created if it does not exist yet.
 6. Use **Scan another folder** for a one-time recursive scan outside the configured VRCX folders.
 7. Use **Start watching** when you want the app to monitor configured folders during the current session. Choose **OnDetection** to analyze each image as it arrives, or **OnInterval** to ignore individual arrivals and sweep the folders on a timer instead (default 60 seconds, range 15–3600). Temporarily unavailable folders are attached automatically when they return.
-8. Review matches with **Keep incoming**, **Keep match**, or **Move as Unique**.
-9. **Stop** interrupts a running scan. It stops between images, never during one, so nothing is left half-moved.
+8. Review matches with **Keep incoming**, **Keep match**, or **Move as Unique**. A review holding several matches asks for confirmation once, not once per match.
+9. Open **Animations** to turn emoji sheets into GIFs. See *Animated emoji* above.
+10. **Stop** interrupts a running scan. It stops between images, never during one, so nothing is left half-moved.
 
 Suggested VRCX source root:
 
@@ -62,7 +118,13 @@ C:\Users\<you>\Pictures\VRChat
 
 The default category folders are `Emoji`, `Prints`, and `Stickers` beneath that root, and the default archive is `Archived Images` beside them. The Pictures folder is located through Windows, so a Pictures folder redirected to OneDrive is found correctly.
 
-The app suggests category folders beneath that root. Source paths remain editable. New files are written beneath the single output root while preserving their category-relative path. For example, `Emoji\2025-05\image.png` moves to `<output>\Emoji\2025-05\image.png`.
+The app suggests category folders beneath that root. Source paths remain editable. New files are written beneath the single output root, under their category. **Archive folders** in Settings decides what happens below that, for an image that came from `Emoji\2025-05\image.png`:
+
+- **CategoryRoot** (the default) writes `<output>\Emoji\image.png`. Everything for a category lands directly in that category's folder.
+- **CategoryYearMonth** writes `<output>\Emoji\2025-05\image.png`, one folder per month taken from when the image was written.
+- **PreserveIncomingRelativeFolder** writes `<output>\Emoji\2025-05\image.png`, recreating whatever folders the image already sat in under its source.
+
+Changing this decides where new files go. Existing archived files are not moved.
 
 **Start with Windows** launches the app in background watching mode. Ordinary launches begin with watching stopped.
 
