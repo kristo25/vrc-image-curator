@@ -1,0 +1,20 @@
+=== rename the GitHub repository ===
+--- is the GitHub CLI available and signed in? ---
+gh version 2.96.0 (2026-07-02)
+https://github.com/cli/cli/releases/tag/v2.96.0
+github.com
+  ✓ Logged in to github.com account kristo25 (keyring)
+  - Active account: true
+  - Git operations protocol: https
+  - Token: gho_************************************
+  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'
+GH_AUTH=yes
+
+--- renaming vrc-image-curator to vrc-pic-sorter ---
+RENAME=ok
+--- remote now ---
+origin	https://github.com/kristo25/vrc-pic-sorter.git (fetch)
+origin	https://github.com/kristo25/vrc-pic-sorter.git (push)
+--- does the new remote answer? ---
+b7ca9e1b3961723a9e74d7eb7fc6e50cb77ea750	refs/heads/main
+LSREMOTE_EXIT=0

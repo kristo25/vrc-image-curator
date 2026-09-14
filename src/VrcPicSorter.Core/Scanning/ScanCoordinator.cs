@@ -251,17 +251,28 @@ public sealed class ScanCoordinator
         try
         {
             var state = await _stateStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+            // Each candidate carries what it is as well as where it is. Naming the category of
+            // folder alone left a person with three things to check and no way to tell which one
+            // they had hit - most often the output folder, whose own archive this would re-ingest.
             var disallowed = state.Settings.CategoryMappings
                 .Where(mapping => mapping.IsEnabled)
-                .Select(mapping => mapping.SourcePath)
-                .Append(state.Settings.OutputRootPath)
-                .Append(state.Settings.HoldingRootPath)
-                .Concat(state.Settings.LegacyArchiveMappings.Select(mapping => mapping.ArchivePath))
-                .Where(path => !string.IsNullOrWhiteSpace(path));
-            if (disallowed.Any(path => PathBoundary.Overlaps(normalizedSource, path)))
+                .Select(mapping => (Description: $"the {mapping.Category} source folder", Path: mapping.SourcePath))
+                .Append((Description: "the output folder", Path: state.Settings.OutputRootPath))
+                .Append((Description: "the application holding folder", Path: state.Settings.HoldingRootPath))
+                .Concat(state.Settings.LegacyArchiveMappings.Select(
+                    mapping => (Description: $"the retained {mapping.Category} archive folder", Path: mapping.ArchivePath)))
+                .Where(candidate => !string.IsNullOrWhiteSpace(candidate.Path))
+                .ToArray();
+
+            var clash = Array.Find(disallowed, candidate => PathBoundary.Overlaps(normalizedSource, candidate.Path));
+            if (clash.Path is not null)
             {
+                // Being handed back the same path one has just chosen reads as a non-answer, so
+                // the identical case says what that folder already is instead.
                 throw new InvalidOperationException(
-                    "The selected folder overlaps a configured source, output, or holding folder.");
+                    string.Equals(PathBoundary.Normalize(clash.Path), normalizedSource, StringComparison.OrdinalIgnoreCase)
+                        ? $"That folder is already {clash.Description}, so it cannot also be scanned as a source."
+                        : $"That folder cannot be scanned because it overlaps {clash.Description}:{Environment.NewLine}{clash.Path}");
             }
 
             var snapshot = state.Settings.OutputRootConfirmed

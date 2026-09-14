@@ -326,6 +326,64 @@ public sealed class ScanCoordinatorTests
     }
 
     [Fact]
+    public async Task ScanningTheOutputFolderSaysThatIsWhatItIs()
+    {
+        // Choosing the archive as a folder to scan is the easy mistake to make, and being told
+        // only that it "overlaps a configured source, output, or holding folder" left three
+        // candidates and no way to tell which had been hit.
+        using var directory = new TestDirectory();
+        var configuredSource = directory.GetPath("configured");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        var outputRoot = directory.GetPath("archive");
+        Directory.CreateDirectory(configuredSource);
+        Directory.CreateDirectory(archiveRoot);
+        using var store = FileRouterTests.CreateStore(directory, configuredSource, archiveRoot);
+        await store.UpdateAsync(state =>
+        {
+            state.Settings.OutputRootPath = outputRoot;
+            return true;
+        });
+        var decoder = new ImageDecoder();
+        var coordinator = new ScanCoordinator(
+            store,
+            new ArchiveIndexer(store, decoder),
+            decoder,
+            new FileRouter(store, decoder, new FileRouterTests.FakeRecycleBinService()));
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => coordinator.ScanFolderAsync(outputRoot, VrcImageCategory.Emoji, progress: null));
+
+        Assert.Contains("is already the output folder", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ScanningInsideAConfiguredSourceNamesThatSourceAndItsPath()
+    {
+        using var directory = new TestDirectory();
+        var configuredSource = directory.GetPath("configured");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        var nested = Path.Combine(configuredSource, "nested");
+        Directory.CreateDirectory(nested);
+        Directory.CreateDirectory(archiveRoot);
+        using var store = FileRouterTests.CreateStore(directory, configuredSource, archiveRoot);
+        var decoder = new ImageDecoder();
+        var coordinator = new ScanCoordinator(
+            store,
+            new ArchiveIndexer(store, decoder),
+            decoder,
+            new FileRouter(store, decoder, new FileRouterTests.FakeRecycleBinService()));
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => coordinator.ScanFolderAsync(nested, VrcImageCategory.Emoji, progress: null));
+
+        Assert.Contains("the Emoji source folder", failure.Message, StringComparison.Ordinal);
+        Assert.Contains(configuredSource, failure.Message, StringComparison.Ordinal);
+
+        // The same-folder wording belongs to the other case; this one really is an overlap.
+        Assert.DoesNotContain("is already", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ManualScanProgressUsesOneStableFileSnapshot()
     {
         using var directory = new TestDirectory();

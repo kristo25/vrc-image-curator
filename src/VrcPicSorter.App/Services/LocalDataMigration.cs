@@ -1,4 +1,6 @@
 using System.IO;
+using VrcPicSorter.Core.FileSystem;
+using VrcPicSorter.Core.Models;
 
 namespace VrcPicSorter.App.Services;
 
@@ -52,4 +54,74 @@ public static class LocalDataMigration
             return false;
         }
     }
+
+    /// <summary>
+    /// True when a setting still names a path inside the old data folder.
+    /// </summary>
+    /// <remarks>
+    /// Moving the folder is only half the job. Paths are stored absolute, so a setting written
+    /// while the application had its old name goes on naming the old folder afterwards - which is
+    /// now a folder that does not exist. The holding root is the one that matters: it is derived
+    /// from the data folder, and clearing local data refuses to run when it sits outside it.
+    /// </remarks>
+    public static bool NeedsRebase(AppSettings settings, string previousDirectory)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        ArgumentException.ThrowIfNullOrWhiteSpace(previousDirectory);
+
+        return IsInside(settings.HoldingRootPath, previousDirectory)
+            || IsInside(settings.OutputRootPath, previousDirectory)
+            || settings.CategoryMappings.Any(mapping =>
+                IsInside(mapping.SourcePath, previousDirectory)
+                || IsInside(mapping.ArchivePath, previousDirectory))
+            || settings.LegacyArchiveMappings.Any(mapping => IsInside(mapping.ArchivePath, previousDirectory));
+    }
+
+    /// <summary>
+    /// Rewrites every stored path that sat inside <paramref name="previousDirectory"/> so it names
+    /// the same place inside <paramref name="currentDirectory"/> instead.
+    /// </summary>
+    /// <remarks>
+    /// Paths outside the old data folder are left exactly as they are. Someone's archive on another
+    /// drive has nothing to do with what this application is called.
+    /// </remarks>
+    /// <returns>How many paths were rewritten.</returns>
+    public static int RebasePaths(AppSettings settings, string previousDirectory, string currentDirectory)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        ArgumentException.ThrowIfNullOrWhiteSpace(previousDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(currentDirectory);
+
+        var rebased = 0;
+        settings.HoldingRootPath = Rebase(settings.HoldingRootPath, previousDirectory, currentDirectory, ref rebased);
+        settings.OutputRootPath = Rebase(settings.OutputRootPath, previousDirectory, currentDirectory, ref rebased);
+
+        foreach (var mapping in settings.CategoryMappings)
+        {
+            mapping.SourcePath = Rebase(mapping.SourcePath, previousDirectory, currentDirectory, ref rebased);
+            mapping.ArchivePath = Rebase(mapping.ArchivePath, previousDirectory, currentDirectory, ref rebased);
+        }
+
+        foreach (var mapping in settings.LegacyArchiveMappings)
+        {
+            mapping.ArchivePath = Rebase(mapping.ArchivePath, previousDirectory, currentDirectory, ref rebased);
+        }
+
+        return rebased;
+    }
+
+    private static string Rebase(string path, string previousDirectory, string currentDirectory, ref int rebased)
+    {
+        if (!IsInside(path, previousDirectory))
+        {
+            return path;
+        }
+
+        var relative = Path.GetRelativePath(previousDirectory, path);
+        rebased++;
+        return relative == "." ? currentDirectory : Path.Combine(currentDirectory, relative);
+    }
+
+    private static bool IsInside(string path, string previousDirectory) =>
+        !string.IsNullOrWhiteSpace(path) && PathBoundary.Contains(previousDirectory, path);
 }

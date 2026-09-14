@@ -11,6 +11,9 @@ public sealed class AppRuntime : IDisposable
 {
     internal static readonly TimeSpan ProductionFileSettleDelay = TimeSpan.FromMilliseconds(750);
 
+    /// <summary>Where this application kept its data before the rename, or null when isolated.</summary>
+    private readonly string? _previousStateDirectory;
+
     public AppRuntime(string? stateDirectory = null, bool allowStartupRegistration = true)
     {
         var isolated = stateDirectory is not null;
@@ -22,14 +25,13 @@ public sealed class AppRuntime : IDisposable
         {
             var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             StateDirectory = Path.Combine(localAppData, "VrcPicSorter");
+            _previousStateDirectory = Path.Combine(localAppData, LocalDataMigration.PreviousFolderName);
 
             // The application answered to another name until 1.4.0, and everything it remembers
             // lives in a folder named after it. Carried across here rather than anywhere later,
             // because the state store below reads that folder the moment it is constructed. A
             // folder given with --data-dir is left alone: it was named by whoever passed it.
-            LocalDataMigration.CarryOver(
-                Path.Combine(localAppData, LocalDataMigration.PreviousFolderName),
-                StateDirectory);
+            LocalDataMigration.CarryOver(_previousStateDirectory, StateDirectory);
         }
         AllowStartupRegistration = allowStartupRegistration;
         StateStore = new JsonStateStore(
@@ -76,6 +78,14 @@ public sealed class AppRuntime : IDisposable
         _ = await StateStore.LoadAsync(cancellationToken).ConfigureAwait(false);
         _ = await Router.RecoverPendingOperationsAsync(cancellationToken).ConfigureAwait(false);
 
+        // Moving the data folder leaves the paths recorded inside the document still naming the old
+        // one. Repaired on every start rather than only in the run that moved the folder, because a
+        // crash between the two would otherwise strand a setting pointing at a folder that is gone.
+        if (_previousStateDirectory is { } previousDirectory)
+        {
+            await RepairMigratedPathsAsync(previousDirectory, cancellationToken).ConfigureAwait(false);
+        }
+
         // A start-with-Windows registration made under the old name would otherwise keep launching
         // whatever now sits at the old executable's path, while Settings reported the option as
         // off. This is the first point where the executable's own path is known.
@@ -83,6 +93,25 @@ public sealed class AppRuntime : IDisposable
         {
             Startup.CarryOverPreviousName(executablePath);
         }
+    }
+
+    private async Task RepairMigratedPathsAsync(string previousDirectory, CancellationToken cancellationToken)
+    {
+        // Checked before writing: every start would otherwise rewrite the state document to say
+        // exactly what it already said.
+        var state = await StateStore.LoadAsync(cancellationToken).ConfigureAwait(false);
+        if (!LocalDataMigration.NeedsRebase(state.Settings, previousDirectory))
+        {
+            return;
+        }
+
+        _ = await StateStore.UpdateAsync(
+                document => LocalDataMigration.RebasePaths(
+                    document.Settings,
+                    previousDirectory,
+                    StateDirectory),
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public async Task ApplyAutomationSettingsAsync(bool updateStartupRegistration)
