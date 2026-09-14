@@ -24,3 +24,5 @@ TestResults/
 /rename*.bat
 /rename*.ps1
 /rename*.txt
+/repo-rename*.bat
+/repo-rename*.txt
