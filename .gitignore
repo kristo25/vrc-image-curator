@@ -16,6 +16,8 @@ TestResults/
 /build-log.txt
 /push-to-github.bat
 /Claude outputs/
-/git-report.bat
+
+# Local git helpers and their logs: useful on this machine, not part of the product.
+/git-*.bat
+/git-*-log.txt
 /git-report.txt
-/git-commit-log.txt
