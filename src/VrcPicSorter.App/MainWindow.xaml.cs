@@ -22,6 +22,7 @@ public partial class MainWindow : Window
     private readonly PreviewService _previewService = new();
     private readonly LatestRequestGuard _reviewDisplayRequests = new();
     private readonly KeepIncomingPrompt _keepIncomingPrompt = new();
+    private IReadOnlyList<ArchiveRelocationStep> _retainedArchives = [];
     private bool _busy;
     private bool _loadingSettings;
     private CancellationTokenSource? _operationCancellation;
@@ -922,6 +923,7 @@ public partial class MainWindow : Window
         }
 
         await OfferToBringTheArchiveAlongAsync(draft.OutputRootPath, relocation);
+        await RefreshRetainedArchivesAsync();
 
         UpdateResolvedDestinations(draft.OutputRootPath);
         UpdateStartupStatusText();
@@ -989,6 +991,24 @@ public partial class MainWindow : Window
             return;
         }
 
+        await MoveArchivesAsync(relocation);
+    }
+
+    /// <summary>
+    /// Moves the planned archives, points the index at where the files landed, and forgets the
+    /// folders that emptied.
+    /// </summary>
+    /// <remarks>
+    /// Shared by the question asked when the output folder changes and by the button in Settings,
+    /// so the two cannot drift into doing subtly different things to a person's archive.
+    /// </remarks>
+    private async Task MoveArchivesAsync(IReadOnlyList<ArchiveRelocationStep> relocation)
+    {
+        if (relocation.Count == 0)
+        {
+            return;
+        }
+
         await RunBusyAsync(
             "Moving your archive...",
             async () =>
@@ -1009,12 +1029,74 @@ public partial class MainWindow : Window
                     });
 
                 await RefreshAsync();
+                await RefreshRetainedArchivesAsync();
                 SetStatus(
                     result.LeftBehind == 0
-                        ? $"Moved {result.Moved} images into the new archive."
+                        ? $"Moved {result.Moved} images into your archive."
                         : $"Moved {result.Moved} images; {result.LeftBehind} were left where they are.");
                 await ReportScanErrorsAsync(result.Errors);
             });
+    }
+
+    /// <summary>
+    /// Shows the archive folders an output folder change has left behind, or hides the section
+    /// when there are none.
+    /// </summary>
+    private async Task RefreshRetainedArchivesAsync()
+    {
+        if (RetainedArchivesPanel is null)
+        {
+            return;
+        }
+
+        var settings = (await _runtime.StateStore.LoadAsync()).Settings;
+
+        // Planning counts and measures every file in every retained folder, so it is kept off the
+        // thread drawing the window. An archive of any size would otherwise freeze the page as it
+        // opened.
+        IReadOnlyList<ArchiveRelocationStep> steps = string.IsNullOrWhiteSpace(settings.OutputRootPath)
+            ? []
+            : await Task.Run(() => ArchiveRelocation.Plan(settings, settings.OutputRootPath));
+
+        _retainedArchives = steps;
+        RetainedArchivesList.ItemsSource = steps
+            .Select(step => new
+            {
+                step.From,
+                Summary = $"{step.FileCount} images, {step.TotalBytes / (double)(1024 * 1024):0.#} MB",
+            })
+            .ToArray();
+
+        RetainedArchivesPanel.Visibility = steps.Count == 0
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+    }
+
+    private async void MoveRetainedArchives(object sender, RoutedEventArgs e)
+    {
+        var relocation = _retainedArchives;
+        if (relocation.Count == 0)
+        {
+            await RefreshRetainedArchivesAsync();
+            return;
+        }
+
+        var images = relocation.Sum(step => step.FileCount);
+        var destination = (await _runtime.StateStore.LoadAsync()).Settings.OutputRootPath;
+        if (MessageBox.Show(
+                this,
+                $"Move {images} images into {destination}?{Environment.NewLine}{Environment.NewLine}"
+                    + "Nothing is deleted. A file whose name is already taken in your archive stays "
+                    + "where it is and is reported.",
+                "Move retained archives",
+                MessageBoxButton.OKCancel,
+                MessageBoxImage.Question) != MessageBoxResult.OK)
+        {
+            SetStatus("Move canceled.");
+            return;
+        }
+
+        await MoveArchivesAsync(relocation);
     }
 
     /// <summary>True when nothing is left in the folder, and false if that cannot be established.</summary>
@@ -1388,7 +1470,20 @@ public partial class MainWindow : Window
 
     private void ShowHistoryPage(object sender, RoutedEventArgs e) => ShowPage(HistoryPage);
 
-    private void ShowSettingsPage(object sender, RoutedEventArgs e) => ShowPage(SettingsPage);
+    private void ShowSettingsPage(object sender, RoutedEventArgs e)
+    {
+        ShowPage(SettingsPage);
+
+        // Counted when the page is opened rather than held from startup: a scan or a move in the
+        // meantime changes what is actually left behind.
+        _ = AsyncCommandRunner.RunAsync(
+            RefreshRetainedArchivesAsync,
+            exception => Dispatcher.InvokeAsync(
+                    () => ShowSettingsNotice(
+                        $"Could not check for retained archives. {exception.Message}",
+                        isWarning: true))
+                .Task);
+    }
 
     private void ShowPage(UIElement page)
     {

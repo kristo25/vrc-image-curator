@@ -415,6 +415,41 @@
                         <Button Style="{StaticResource PrimaryButton}" Content="Rebuild indexes" Click="RebuildIndexes" automation:AutomationProperties.Name="Rebuild enabled archive indexes" />
                     </WrapPanel>
 
+                    <!-- Collapsed unless something is actually left behind. A section that tells a
+                         person their archive is in one piece is noise on every other visit. -->
+                    <Border x:Name="RetainedArchivesPanel" Visibility="Collapsed"
+                            Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
+                            BorderThickness="1" CornerRadius="5" Padding="16" Margin="0,0,0,20">
+                        <StackPanel>
+                            <TextBlock FontSize="17" FontWeight="SemiBold" Text="Retained archives" />
+                            <TextBlock x:Name="RetainedArchivesSummary" Margin="0,3,0,12" TextWrapping="Wrap"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       Text="Images filed here before you changed the output folder. They are still recognised, so duplicates are found across both, but they are not in your current archive." />
+                            <ItemsControl x:Name="RetainedArchivesList" Margin="0,0,0,12"
+                                          automation:AutomationProperties.Name="Archive folders left behind by an output folder change">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="0,0,0,6">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="{Binding From}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                                       ToolTip="{Binding From}" VerticalAlignment="Center" />
+                                            <TextBlock Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center"
+                                                       Foreground="{StaticResource PurpleHoverBrush}" FontWeight="SemiBold"
+                                                       Text="{Binding Summary}" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <Button x:Name="MoveRetainedArchivesButton" HorizontalAlignment="Left"
+                                    Style="{StaticResource PrimaryButton}" Content="Move them into my archive"
+                                    Click="MoveRetainedArchives"
+                                    automation:AutomationProperties.Name="Move retained archive folders into the current archive" />
+                        </StackPanel>
+                    </Border>
+
                     <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="5" Padding="16" Margin="0,0,0,20">
                         <StackPanel>
                             <TextBlock FontSize="17" FontWeight="SemiBold" Text="Operation recovery" />
