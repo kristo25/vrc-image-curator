@@ -18,7 +18,12 @@ public sealed class WatchService : IDisposable
     private System.Threading.Timer? _retryTimer;
     private System.Threading.Timer? _sweepTimer;
     private CancellationTokenSource _runCancellation = new();
-    private CancellationTokenSource? _activeScanCancellation;
+    /// <summary>
+    /// Every scan this watcher has started and not yet finished. A second category is claimed
+    /// before it waits for the scan gate, so a single field held the one that had not started
+    /// rather than the one actually running, and Stop cancelled the wrong scan.
+    /// </summary>
+    private readonly HashSet<CancellationTokenSource> _activeScanCancellations = [];
     private bool _analyzeOnDetection = true;
     private bool _isRunning;
     private bool _disposed;
@@ -58,7 +63,10 @@ public sealed class WatchService : IDisposable
     {
         lock (_sync)
         {
-            _activeScanCancellation?.Cancel();
+            foreach (var cancellation in _activeScanCancellations.ToArray())
+            {
+                cancellation.Cancel();
+            }
         }
     }
 
@@ -171,7 +179,11 @@ public sealed class WatchService : IDisposable
             }
 
             _pending.Clear();
-            _activeScanCancellation?.Cancel();
+            foreach (var cancellation in _activeScanCancellations.ToArray())
+            {
+                cancellation.Cancel();
+            }
+
             _retryTimer?.Dispose();
             _retryTimer = null;
             _sweepTimer?.Dispose();
@@ -429,7 +441,7 @@ public sealed class WatchService : IDisposable
             // Linked so Stop cancels this scan while watching itself keeps running. Not disposed
             // here if it belongs to another in-flight category; each run disposes its own.
             scanCancellation = CancellationTokenSource.CreateLinkedTokenSource(_runCancellation.Token);
-            _activeScanCancellation = scanCancellation;
+            _activeScanCancellations.Add(scanCancellation);
             cancellationToken = scanCancellation.Token;
         }
 
@@ -498,10 +510,7 @@ public sealed class WatchService : IDisposable
 
             lock (_sync)
             {
-                if (ReferenceEquals(_activeScanCancellation, scanCancellation))
-                {
-                    _activeScanCancellation = null;
-                }
+                _activeScanCancellations.Remove(scanCancellation);
             }
 
             scanCancellation.Dispose();

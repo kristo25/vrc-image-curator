@@ -12,8 +12,16 @@ public static class PathBoundary
     {
         var normalizedRoot = Normalize(root);
         var normalizedCandidate = Path.GetFullPath(candidate);
+
+        // A volume root keeps its separator through Normalize - "D:\" stays "D:\" - so appending
+        // one here would search for "D:\\" and match nothing. A whole drive chosen as the output
+        // root would then appear to contain no folder at all, which turns the overlap guards off
+        // and makes every archive destination look like an escape.
+        var prefix = normalizedRoot.EndsWith(Path.DirectorySeparatorChar)
+            ? normalizedRoot
+            : normalizedRoot + Path.DirectorySeparatorChar;
         return string.Equals(normalizedRoot, Path.TrimEndingDirectorySeparator(normalizedCandidate), StringComparison.OrdinalIgnoreCase)
-            || normalizedCandidate.StartsWith(normalizedRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+            || normalizedCandidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
     }
 
     public static bool Overlaps(string first, string second) => Contains(first, second) || Contains(second, first);

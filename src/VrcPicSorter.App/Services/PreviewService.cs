@@ -1,4 +1,5 @@
 using System.IO;
+using System.Runtime.CompilerServices;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using SixLabors.ImageSharp;
@@ -12,7 +13,13 @@ namespace VrcPicSorter.App.Services;
 public sealed class PreviewService : IDisposable
 {
     private readonly Dictionary<System.Windows.Controls.Image, PreviewAnimation> _animations = [];
-    private readonly Dictionary<System.Windows.Controls.Image, int> _versions = [];
+
+    /// <summary>
+    /// Which load each control is waiting for, so a load that finishes after the control moved on
+    /// can tell. Weak keys: the candidate list recycles its controls, and a plain dictionary kept
+    /// every one of them - and the visual tree hanging off it - alive for the life of the window.
+    /// </summary>
+    private readonly ConditionalWeakTable<System.Windows.Controls.Image, StrongBox<int>> _versions = new();
 
     public BitmapSource? Load(string? path, int decodeWidth = 960)
     {
@@ -54,41 +61,33 @@ public sealed class PreviewService : IDisposable
     {
         ArgumentNullException.ThrowIfNull(target);
         Stop(target);
-        var version = _versions.GetValueOrDefault(target) + 1;
-        _versions[target] = version;
+        var version = NextVersion(target);
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
         {
             target.Source = null;
             return;
         }
 
+        // Load decodes the file at its original size, resizes it and then walks every pixel to
+        // swap red and blue. On the UI thread a single 4K screenshot stopped the window repainting
+        // for the whole of that, twice per queue selection. The BitmapSource it returns is frozen,
+        // so it is free to cross back.
         if (!Path.GetExtension(path).Equals(".gif", StringComparison.OrdinalIgnoreCase))
         {
-            target.Source = Load(path, decodeWidth);
+            var still = await Task.Run(() => Load(path, decodeWidth));
+            if (CurrentVersion(target) != version)
+            {
+                return;
+            }
+
+            target.Source = still;
             return;
         }
 
         try
         {
-            var info = await SixLabors.ImageSharp.Image.IdentifyAsync(path);
-            ImageResourceLimits.EnsureSafe(info.Width, info.Height, Math.Max(1, info.FrameMetadataCollection.Count));
-            using var image = await SixLabors.ImageSharp.Image.LoadAsync<Rgba32>(path);
-            image.Mutate(context => context.AutoOrient());
-            if (image.Width > decodeWidth)
-            {
-                image.Mutate(context => context.Resize(decodeWidth, 0));
-            }
-
-            var frames = new List<BitmapSource>(image.Frames.Count);
-            var delays = new List<TimeSpan>(image.Frames.Count);
-            foreach (var frame in image.Frames)
-            {
-                frames.Add(CreateBitmapSource(frame, image.Width, image.Height));
-                var milliseconds = Math.Max(20, frame.Metadata.GetGifMetadata().FrameDelay * 10);
-                delays.Add(TimeSpan.FromMilliseconds(milliseconds));
-            }
-
-            if (_versions.GetValueOrDefault(target) != version)
+            var (frames, delays) = await Task.Run(() => LoadAnimation(path, decodeWidth));
+            if (CurrentVersion(target) != version)
             {
                 return;
             }
@@ -109,9 +108,48 @@ public sealed class PreviewService : IDisposable
                 or InvalidDataException
                 or OverflowException)
         {
-            target.Source = Load(path, decodeWidth);
+            var still = await Task.Run(() => Load(path, decodeWidth));
+            if (CurrentVersion(target) == version)
+            {
+                target.Source = still;
+            }
         }
     }
+
+    private static (List<BitmapSource> Frames, List<TimeSpan> Delays) LoadAnimation(
+        string path,
+        int decodeWidth)
+    {
+        var info = SixLabors.ImageSharp.Image.Identify(path);
+        ImageResourceLimits.EnsureSafe(info.Width, info.Height, Math.Max(1, info.FrameMetadataCollection.Count));
+        using var image = SixLabors.ImageSharp.Image.Load<Rgba32>(path);
+        image.Mutate(context => context.AutoOrient());
+        if (image.Width > decodeWidth)
+        {
+            image.Mutate(context => context.Resize(decodeWidth, 0));
+        }
+
+        var frames = new List<BitmapSource>(image.Frames.Count);
+        var delays = new List<TimeSpan>(image.Frames.Count);
+        foreach (var frame in image.Frames)
+        {
+            frames.Add(CreateBitmapSource(frame, image.Width, image.Height));
+            var milliseconds = Math.Max(20, frame.Metadata.GetGifMetadata().FrameDelay * 10);
+            delays.Add(TimeSpan.FromMilliseconds(milliseconds));
+        }
+
+        return (frames, delays);
+    }
+
+    private int NextVersion(System.Windows.Controls.Image target)
+    {
+        var box = _versions.GetValue(target, _ => new StrongBox<int>(0));
+        box.Value++;
+        return box.Value;
+    }
+
+    private int CurrentVersion(System.Windows.Controls.Image target) =>
+        _versions.TryGetValue(target, out var box) ? box.Value : 0;
 
     private static BitmapSource CreateBitmapSource(ImageFrame<Rgba32> frame, int width, int height)
     {
@@ -137,6 +175,13 @@ public sealed class PreviewService : IDisposable
 
     public void Stop(System.Windows.Controls.Image target)
     {
+        ArgumentNullException.ThrowIfNull(target);
+
+        // Moving the version on matters as much as unregistering. A load started for this control
+        // and still running would otherwise finish, see its own version, and start a timer on a
+        // control that has already left the screen - one nothing would ever stop again, holding
+        // every decoded frame with it.
+        NextVersion(target);
         if (_animations.Remove(target, out var animation))
         {
             animation.Dispose();

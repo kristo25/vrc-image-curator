@@ -151,6 +151,55 @@ public sealed class JsonStateStoreTests
         Assert.Null(reloadedCategory.LastError);
     }
 
+    /// <summary>
+    /// While a scan holds its writes the fingerprints live only in memory, and reading the state
+    /// back mid-scan used to answer from the sidecar alone. If the sidecar had gone - a cleanup
+    /// tool, a sync client, anything - that answer was "no fingerprints", which stripped them off
+    /// every record the scan had just added, took the index stale in the middle of the scan that
+    /// added them, and failed every remaining image with "rescan required".
+    /// </summary>
+    [Fact]
+    public async Task HeldFingerprintsSurviveASidecarThatDisappearsMidScan()
+    {
+        using var directory = new TestDirectory();
+        using var store = CreateStore(directory);
+        var state = await store.LoadAsync();
+        var category = state.ArchiveIndex.Categories[0];
+        category.Status = IndexStatus.Current;
+
+        await store.HoldFingerprintWritesAsync();
+        using var image = ImageFixtureFactory.CreatePattern(seed: 31);
+        var fingerprint = ImageFingerprint.Create(ImageFixtureFactory.ToDecodedImage(image));
+        category.Images.Add(new IndexedImageRecord
+        {
+            Id = Guid.NewGuid(),
+            Category = category.Category,
+            Path = @"D:\Archive\first.png",
+            FileSize = 1,
+            LastWriteUtc = DateTimeOffset.UnixEpoch,
+            Width = fingerprint.Width,
+            Height = fingerprint.Height,
+            ExactFingerprint = fingerprint.ExactIdentity,
+            PerceptualFingerprint = fingerprint.PerceptualFrames[0].DifferenceHash,
+            Fingerprint = fingerprint,
+        });
+        await store.SaveAsync(state);
+
+        // Held, so the new fingerprint is in memory only - and now the file it would have gone to
+        // is taken away underneath the scan.
+        File.Delete(store.FingerprintPath);
+
+        var reloaded = await store.LoadAsync();
+
+        var reloadedCategory = reloaded.ArchiveIndex.Categories[0];
+        Assert.Equal(IndexStatus.Current, reloadedCategory.Status);
+        Assert.Null(reloadedCategory.LastError);
+        Assert.NotNull(Assert.Single(reloadedCategory.Images).Fingerprint);
+
+        await store.ReleaseFingerprintWritesAsync();
+        Assert.True(File.Exists(store.FingerprintPath));
+    }
+
     [Fact]
     public async Task SaveThenLoadPreservesTheCompleteStateDocument()
     {

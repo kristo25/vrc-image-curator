@@ -92,17 +92,17 @@ public sealed class ArchiveIndexer
         var skipped = new List<string>();
         var indexed = new List<IndexedImageRecord>();
         IEnumerable<string> paths;
+        // Everything under an archive root is indexed, animations included. They were left out
+        // once, on the grounds that a GIF would become a duplicate candidate of the sheet it came
+        // from - but it does not: a sheet is a grid of every frame at full size and the animation
+        // is one frame playing, so they resemble each other about as much as a contact sheet
+        // resembles a film. Leaving them out cost far more than it saved, because a ready-made GIF
+        // arriving in an incoming folder then had nothing to be compared against and was archived
+        // again every time.
         try
         {
             paths = archiveRoots.SelectMany(PathBoundary.EnumerateFilesWithoutReparsePoints)
                 .Where(path => SupportedExtensions.Contains(Path.GetExtension(path)))
-                // Everything under an archive root is indexed, animations included. They were left
-                // out once, on the grounds that a GIF would become a duplicate candidate of the
-                // sheet it came from - but it does not: a sheet is a grid of every frame at full
-                // size and the animation is one frame playing, so they resemble each other about as
-                // much as a contact sheet resembles a film. Leaving them out cost far more than it
-                // saved, because a ready-made GIF arriving in an incoming folder then had nothing
-                // to be compared against and was archived again every time.
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .Order(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
@@ -122,7 +122,23 @@ public sealed class ArchiveIndexer
         foreach (var path in paths)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var info = new FileInfo(path);
+
+            // The list of paths was taken before any of this decoding started, and on a large
+            // archive that is minutes ago. A file deleted or locked in between - by the user, or by
+            // OneDrive moving it - used to throw straight out of here and disable the whole
+            // category. It is skipped like any other unreadable file instead.
+            FileInfo info;
+            try
+            {
+                info = new FileInfo(path);
+                _ = info.Length;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                skipped.Add($"{path}: {exception.Message}");
+                continue;
+            }
+
             if (reuseUnchanged
                 && previousRecords.TryGetValue(path, out var previous)
                 && previous.Fingerprint!.HasCurrentFeatures

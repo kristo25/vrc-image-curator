@@ -44,7 +44,10 @@ public sealed class AppRuntime : IDisposable
                 : AppStateDefaults.Create(stateDirectoryPath: StateDirectory));
         Decoder = new ImageDecoder();
         Indexer = new ArchiveIndexer(StateStore, Decoder);
-        Router = new FileRouter(StateStore, Decoder, new WindowsRecycleBinService());
+        Router = new FileRouter(
+            StateStore,
+            Decoder,
+            new WindowsRecycleBinService(RecycleBinPolicy.IsDisabledForVolume));
         Scanner = new ScanCoordinator(
             StateStore,
             Indexer,

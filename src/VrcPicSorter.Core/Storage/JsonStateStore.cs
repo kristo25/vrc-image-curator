@@ -612,6 +612,16 @@ public sealed class JsonStateStore : IDisposable
         var info = new FileInfo(FingerprintPath);
         if (!info.Exists)
         {
+            // Writes are being held, so the set in memory is the current one and the file simply
+            // has not been written yet. Returning empty here stripped the fingerprint off every
+            // record the scan had just added, took the index stale in the middle of that scan, and
+            // failed every remaining image with "rescan required" - which is what the first scan
+            // after a fresh install did, because an empty archive never writes a sidecar at all.
+            if (_deferredFingerprints is { } held)
+            {
+                return held;
+            }
+
             _fingerprintStamp = null;
             return [];
         }

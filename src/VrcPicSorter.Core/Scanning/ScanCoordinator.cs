@@ -443,6 +443,25 @@ public sealed class ScanCoordinator
                 notes,
                 cancellationToken)
             .ConfigureAwait(false);
+
+        // Those animations are archived images, and they were written after the index was built,
+        // so the index does not know about them. Left that way they are invisible to matching for
+        // the rest of this scan, and an incoming copy of one of them is archived again as though
+        // the app had never made it. Only the new files are decoded here; everything else is reused.
+        if (animated > 0)
+        {
+            var reindexed = await _indexer.RefreshAsync(category, cancellationToken).ConfigureAwait(false);
+            if (reindexed.Status != IndexStatus.Current)
+            {
+                ReportUnprocessed(
+                    sourceSnapshot.Paths.Count,
+                    "Archive index unavailable",
+                    onImageScanned,
+                    onImageProcessed);
+                return new CategoryScanResult(category, 0, 0, 0, 0, [.. errors, .. reindexed.Errors]);
+            }
+        }
+
         var paths = sourceSnapshot.Paths;
         skipped = sourceSnapshot.UnsupportedFiles;
         var settledPaths = await FindSettledPathsAsync(paths, cancellationToken).ConfigureAwait(false);
@@ -482,8 +501,8 @@ public sealed class ScanCoordinator
         // fingerprint and nothing else, so running them early cannot change what any decision
         // sees; the loop below still consumes them strictly in path order.
         var readAhead = Math.Clamp(Environment.ProcessorCount, 1, MaximumConcurrentReads);
-        var readSlots = new SemaphoreSlim(readAhead, readAhead);
-        var largeReadSlot = new SemaphoreSlim(1, 1);
+        using var readSlots = new SemaphoreSlim(readAhead, readAhead);
+        using var largeReadSlot = new SemaphoreSlim(1, 1);
         var inFlight = new Dictionary<string, Task<PreparedImage>>(StringComparer.OrdinalIgnoreCase);
         var nextToRead = 0;
 

@@ -324,8 +324,16 @@ public partial class MainWindow : Window
         }
 
         var decoded = await _runtime.Decoder.DecodeAsync(review.HeldFilePath);
-        return decoded.IsSuccess
-            && ImageFingerprint.Create(decoded.Image!).ExactIdentity == review.IncomingFingerprint;
+        if (!decoded.IsSuccess)
+        {
+            return false;
+        }
+
+        // Create hashes every pixel of every frame and builds a stack of downsamples from them.
+        // Awaited straight from the UI thread it ran on the UI thread, freezing the window for as
+        // long as that took every time a queue row was clicked.
+        var identity = await Task.Run(() => ImageFingerprint.Create(decoded.Image!).ExactIdentity);
+        return identity == review.IncomingFingerprint;
     }
 
     private async void ScanNow(object sender, RoutedEventArgs e)
@@ -716,10 +724,13 @@ public partial class MainWindow : Window
         }
 
         var decoded = await _runtime.Decoder.DecodeAsync(candidate.ArchivePath);
-        if (decoded.IsSuccess
-            && ImageFingerprint.Create(decoded.Image!).ExactIdentity == candidate.ExpectedFingerprint)
+        if (decoded.IsSuccess)
         {
-            return true;
+            var identity = await Task.Run(() => ImageFingerprint.Create(decoded.Image!).ExactIdentity);
+            if (identity == candidate.ExpectedFingerprint)
+            {
+                return true;
+            }
         }
 
         var staleIds = new List<Guid> { candidate.Id };
@@ -767,7 +778,7 @@ public partial class MainWindow : Window
             return false;
         }
 
-        var incomingFingerprint = ImageFingerprint.Create(incomingDecoded.Image!);
+        var incomingFingerprint = await Task.Run(() => ImageFingerprint.Create(incomingDecoded.Image!));
         var refreshedIndex = await _runtime.Indexer.RefreshAsync(review.Category);
         if (refreshedIndex.Status != IndexStatus.Current || refreshedIndex.Errors.Count > 0)
         {
@@ -905,7 +916,7 @@ public partial class MainWindow : Window
             Path.GetFullPath(draft.OutputRootPath),
             StringComparison.OrdinalIgnoreCase)
             ? []
-            : ArchiveRelocation.Plan(settings, draft.OutputRootPath);
+            : await Task.Run(() => ArchiveRelocation.Plan(settings, draft.OutputRootPath));
 
         var startupChanged = settings.Automation.StartWithWindows != draft.StartWithWindows;
         await _runtime.StateStore.UpdateAsync(
@@ -1955,8 +1966,11 @@ public partial class MainWindow : Window
         ExportSheetButton.IsEnabled = true;
         BuildCellOverlay();
 
-        var delay = AtlasGifExporter.FrameDelayFor(name.FramesPerSecond);
-        var effective = 100 / delay;
+        // Asked of the exporter rather than worked out again here. Doing the arithmetic twice is
+        // exactly what once had this tab and the export result disagreeing about the same file:
+        // an integer 100 / delay truncates where the exporter rounds, so an 8 fps sheet was
+        // announced as "exported at 7" and then exported at 8.
+        var effective = AtlasGifExporter.EffectiveFramesPerSecondFor(name.FramesPerSecond);
         var rateNote = effective == name.FramesPerSecond
             ? $"{name.FramesPerSecond} fps"
             : $"{name.FramesPerSecond} fps, exported at {effective} - GIF cannot express the rest";

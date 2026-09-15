@@ -1056,6 +1056,35 @@ public sealed class ScanCoordinatorTests
     }
 
     [Fact]
+    public async Task AnAnimationWrittenDuringAScanIsIndexedByThatSameScan()
+    {
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        const string name = "player_x_4frames_10fps_linearloopStyle.png";
+
+        // Already in the archive, the way a sheet filed before animations existed would be. The
+        // scan fills in its missing animation, and that happens after the index has been built.
+        WriteSheet(Path.Combine(archiveRoot, name));
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var coordinator = CreateCoordinator(store);
+
+        var result = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+
+        Assert.Equal(1, result.Animated);
+        var animation = Path.Combine(archiveRoot, "Animated", "player_x_4frames_10fps_linearloopStyle.gif");
+        Assert.True(File.Exists(animation));
+
+        // Left out of the index it is invisible to matching for the rest of the scan, and an
+        // incoming copy of it is archived all over again as though the app had never made it.
+        var images = (await store.LoadAsync()).ArchiveIndex.Categories
+            .Single(item => item.Category == VrcImageCategory.Emoji).Images;
+        Assert.Contains(images, image => string.Equals(image.Path, animation, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public async Task AFiledSheetIsStillRecognisedWhenTheSameEmojiArrivesAgain()
     {
         // The reference folder sits inside the folder the indexer skips, so the whole point of

@@ -71,6 +71,36 @@ All notable changes to VRC Pic Sorter are recorded here. This project follows
   `emoji (2).gif` asked the same question twice. A copy that decodes to exactly the same picture as
   one already waiting now goes to the Recycle Bin instead, the way a copy of an archived image
   already did. Without a Recycle Bin nothing is deleted and both copies still get asked about.
+- **A drive with the Recycle Bin switched off was still recycled to.** Windows lets a drive be set
+  to "remove files immediately when deleted", and then deletes permanently while still reporting a
+  successful recycle - so the automatic duplicate handling, which asks nobody, could destroy the
+  only copy of a picture. Such a drive is now treated as having no Recycle Bin at all, which every
+  caller already answers by asking instead of deleting.
+- A whole drive chosen as the main output folder matched nothing inside itself, because a volume
+  root keeps its trailing separator. That quietly switched off the guards that stop the app
+  scanning its own archive, and made every archive destination look like an escape from the folder
+  it was already in.
+- An animation the scan writes for a sheet already in the archive is now indexed by that same scan.
+  It was written after the index was built, so for the rest of that scan it did not exist, and an
+  incoming copy of it was archived all over again as though the app had never made it.
+- An archive file deleted or locked between the moment a scan lists it and the moment it is read no
+  longer disables the whole category. It is skipped and reported like any other unreadable file.
+- Startup recovery no longer stops at the first pending operation whose drive cannot recycle. That
+  one is marked as needing attention and the rest are still reconciled.
+- Fingerprints held in memory during a scan survive the sidecar file disappearing underneath them.
+  Reading state back mid-scan used to answer from the file alone, which stripped the fingerprints
+  off everything the scan had just added and failed the rest of the run.
+- Stop now cancels the scan that is actually running. With two categories queued it cancelled the
+  one that had not started yet, while the running one carried on and the window said it was
+  stopping.
+- The Animations tab worked the exported frame rate out a second time instead of asking the
+  exporter, and truncated where the exporter rounds: an 8 fps sheet was announced as "exported at
+  7" and then exported at 8. Seven rates disagreed.
+- Previews, fingerprint checks and the retained-archive scan no longer run on the thread drawing
+  the window. One 4K screenshot froze it twice per click in the review queue, and a large archive
+  froze the Settings page on every field.
+- A preview whose decode finished after its card had left the screen left an animation timer
+  running for the life of the window, holding every decoded frame with it.
 
 ### Known limitations
 

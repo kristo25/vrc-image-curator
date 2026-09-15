@@ -607,7 +607,15 @@ public sealed class FileRouter
                         break;
                 }
             }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+            // NotSupportedException belongs here for the same reason every other caller of the
+            // Recycle Bin catches it: one entry whose drive no longer takes a recycle must land in
+            // Needs attention, not abort startup recovery and leave every later entry - including
+            // held files with no review item yet - unreconciled.
+            catch (Exception exception) when (
+                exception is IOException
+                    or UnauthorizedAccessException
+                    or InvalidOperationException
+                    or NotSupportedException)
             {
                 await MarkNeedsAttentionAsync(entry.Id, exception.Message, cancellationToken).ConfigureAwait(false);
             }

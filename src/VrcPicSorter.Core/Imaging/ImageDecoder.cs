@@ -54,11 +54,16 @@ public sealed class ImageDecoder
 
         try
         {
+            // Delete is shared for the same reason the settle check shares everything: the scan
+            // reads ahead of itself, so when a scan is cancelled a decode can still be running
+            // against a file the next scan is about to move. Without this that move fails with a
+            // sharing violation after the journal has already recorded its intent, leaving an
+            // operation only startup recovery can clear.
             await using var stream = new FileStream(
                 path,
                 FileMode.Open,
                 FileAccess.Read,
-                FileShare.Read,
+                FileShare.Read | FileShare.Delete,
                 bufferSize: 64 * 1024,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
             return await DecodeAsync(stream, path, cancellationToken).ConfigureAwait(false);

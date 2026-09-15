@@ -53,6 +53,24 @@ public sealed class PathBoundaryTests
         }
     }
 
+    /// <summary>
+    /// A volume root keeps its trailing separator, which used to make it contain nothing at all:
+    /// a whole drive chosen as the output root turned the overlap guards off and made every
+    /// archive destination look like an escape from the folder it was already inside.
+    /// </summary>
+    [Theory]
+    [InlineData(@"D:\", @"D:\Emoji", true)]
+    [InlineData(@"D:\", @"D:\Emoji\Animated\one.gif", true)]
+    [InlineData(@"D:\", @"D:\", true)]
+    [InlineData(@"D:\", @"C:\Emoji", false)]
+    [InlineData(@"D:\Archive", @"D:\Archive\Emoji", true)]
+    [InlineData(@"D:\Archive", @"D:\ArchiveOther", false)]
+    public void ContainsAnswersForAVolumeRootAsWellAsAFolder(string root, string candidate, bool expected) =>
+        Assert.Equal(expected, PathBoundary.Contains(root, candidate));
+
+    [Fact]
+    public void AWholeDriveOverlapsAFolderOnIt() =>
+        Assert.True(PathBoundary.Overlaps(@"D:\", @"D:\VRChat\Emoji"));
 }
 
 internal static class ProcessStartInfoExtensions
