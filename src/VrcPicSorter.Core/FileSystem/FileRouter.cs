@@ -210,6 +210,40 @@ public sealed class FileRouter
         await ExecuteRecycleAsync(entry, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Resolves a second copy of a picture that is already waiting in Review: the held copy keeps
+    /// the decision and this copy goes to the Recycle Bin. Throws
+    /// <see cref="NotSupportedException"/> when the Recycle Bin is unavailable for the incoming
+    /// path, so the caller can fall back to a review of its own instead of ever deleting
+    /// permanently.
+    /// </summary>
+    public async Task AutoKeepHeldAsync(
+        string incomingPath,
+        VrcImageCategory category,
+        ImageFingerprint incomingFingerprint,
+        string heldPath,
+        string heldFingerprint,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(incomingFingerprint);
+
+        // The held copy must still be exactly what was scanned before this one is discarded,
+        // otherwise this would delete the only remaining copy.
+        await VerifyImageFingerprintAsync(
+                heldPath,
+                heldFingerprint,
+                "The image waiting in Review changed after it was scanned. No file operation was performed.",
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        var entry = CreateRecycleEntry(
+            incomingPath,
+            category,
+            incomingFingerprint.ExactIdentity,
+            JournalOperationPurpose.AutoKeepHeld);
+        await ExecuteRecycleAsync(entry, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task KeepMatchAsync(
         ReviewItem reviewItem,
         ReviewCandidate candidate,
@@ -747,6 +781,10 @@ public sealed class FileRouter
             case JournalOperationPurpose.RestoreReviewToSource:
                 ResolveReview(state, entry.ReviewItemId);
                 break;
+            case JournalOperationPurpose.AutoKeepHeld:
+                // Deliberately nothing: the held copy keeps its place in the queue, and this
+                // entry only recycled a second copy of the same picture.
+                break;
             case JournalOperationPurpose.DeleteArchiveCandidate:
             case JournalOperationPurpose.PreserveArchiveCandidate:
                 index.Images.RemoveAll(item => item.Id == entry.IndexedImageId);
@@ -783,13 +821,19 @@ public sealed class FileRouter
                 JournalOperationPurpose.FileAnimatedSheet => ActivityKind.AutomaticMove,
                 JournalOperationPurpose.DeleteArchiveCandidate => ActivityKind.DeletionRequested,
                 JournalOperationPurpose.AutoKeepArchived => ActivityKind.DeletionRequested,
+                JournalOperationPurpose.AutoKeepHeld => ActivityKind.DeletionRequested,
                 _ => ActivityKind.ReviewDecision,
             },
             Level = ActivityLevel.Information,
             Category = entry.Category,
-            Message = entry.Purpose == JournalOperationPurpose.AutoKeepArchived
-                ? "Exact duplicate: kept the archived image and recycled the incoming copy."
-                : entry.Purpose.ToString(),
+            Message = entry.Purpose switch
+            {
+                JournalOperationPurpose.AutoKeepArchived =>
+                    "Exact duplicate: kept the archived image and recycled the incoming copy.",
+                JournalOperationPurpose.AutoKeepHeld =>
+                    "Exact duplicate of an image already waiting in Review: recycled the extra copy.",
+                _ => entry.Purpose.ToString(),
+            },
             SourcePath = entry.SourcePath,
             DestinationPath = entry.DestinationPath,
             OperationId = entry.Id,

@@ -451,6 +451,25 @@ public sealed class ScanCoordinator
             .Select(item => item.IncomingOriginalPath)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+        // An image held for review is not in the archive, so the index below never proposes it and
+        // nothing compared a later file against it. Two copies of one picture therefore each
+        // opened their own review card. Everything already waiting for this category counts here,
+        // not only what this run queues.
+        var heldByIdentity = new Dictionary<string, HeldImage>(StringComparer.Ordinal);
+        foreach (var waiting in initial.ReviewQueue)
+        {
+            if (waiting.Status == ReviewStatus.Resolved
+                || waiting.Category != category
+                || waiting.IncomingImageFingerprint is null)
+            {
+                continue;
+            }
+
+            heldByIdentity.TryAdd(
+                waiting.IncomingImageFingerprint.ExactIdentity,
+                new HeldImage(waiting.HeldFilePath, waiting.IncomingImageFingerprint));
+        }
+
         // Rebuilding the candidate list and the key lookup for every incoming image costs a pass
         // over the whole archive each time. The generation moves whenever an image is added to or
         // removed from the index, so keying on it rebuilds exactly when the archive changed - and
@@ -523,6 +542,41 @@ public sealed class ScanCoordinator
                 }
 
                 var fingerprint = prepared.Fingerprint;
+
+                // The same picture saved twice under different names matches the archive the same
+                // way twice, and one review card per copy is one decision too many. The copy
+                // already held keeps the decision; this one decodes to the very same pixels, so
+                // whatever is decided there decides this too, and the Recycle Bin is what that
+                // means for a copy nobody is going to keep.
+                if (heldByIdentity.TryGetValue(fingerprint.ExactIdentity, out var twin))
+                {
+                    try
+                    {
+                        await _router.AutoKeepHeldAsync(
+                                path,
+                                category,
+                                fingerprint,
+                                twin.Path,
+                                twin.Fingerprint.ExactIdentity,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                        autoKept++;
+                        outcome = "Same picture already in review; recycled";
+                        continue;
+                    }
+                    catch (Exception exception) when (
+                        exception is NotSupportedException
+                            or InvalidOperationException
+                            or IOException
+                            or UnauthorizedAccessException)
+                    {
+                        // The Recycle Bin was unavailable, or the held copy changed since it was
+                        // scanned. Never delete and never drop the image: fall through and let
+                        // this copy get a review of its own.
+                        errors.Add($"{path}: could not resolve automatically ({exception.Message}).");
+                    }
+                }
+
                 var relativeDirectory = Path.GetRelativePath(
                     sourceRoot,
                     Path.GetDirectoryName(path) ?? sourceRoot);
@@ -671,6 +725,7 @@ public sealed class ScanCoordinator
                     };
                     await _router.QueueForReviewAsync(review, cancellationToken).ConfigureAwait(false);
                     queuedPaths.Add(path);
+                    heldByIdentity.TryAdd(fingerprint.ExactIdentity, new HeldImage(path, fingerprint));
                     held++;
                     outcome = "Queued for review";
                     continue;
@@ -1327,4 +1382,8 @@ public sealed class ScanCoordinator
     }
 
     private sealed record FileObservation(long Length, DateTime LastWriteTimeUtc);
+
+    /// <summary>An image waiting in Review. It is not in the archive, so it is not in the index
+    /// either, and a later copy of it can only be recognised from here.</summary>
+    private sealed record HeldImage(string Path, ImageFingerprint Fingerprint);
 }

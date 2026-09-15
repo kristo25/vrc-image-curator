@@ -1307,4 +1307,117 @@ public sealed class ScanCoordinatorTests
         });
         image.SaveAsPng(path);
     }
+
+    [Fact]
+    public async Task TwoCopiesOfOnePictureOpenOneReviewCard()
+    {
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        using var archived = ImageFixtureFactory.CreatePattern(140);
+        using var incoming = ImageFixtureFactory.CreateNearDuplicate(archived);
+        await archived.SaveAsPngAsync(Path.Combine(archiveRoot, "existing.png"));
+        var first = Path.Combine(sourceRoot, "copy-a.png");
+        var second = Path.Combine(sourceRoot, "copy-b.png");
+        await incoming.SaveAsPngAsync(first);
+        await incoming.SaveAsPngAsync(second);
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var decoder = new ImageDecoder();
+        var recycleBin = new FileRouterTests.FakeRecycleBinService();
+        var coordinator = new ScanCoordinator(
+            store,
+            new ArchiveIndexer(store, decoder),
+            decoder,
+            new FileRouter(store, decoder, recycleBin),
+            TimeSpan.Zero);
+
+        var result = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+
+        // Both copies match the archived image the same way, and deciding that twice is the same
+        // decision twice. The first is held; the second is the same picture and goes to the bin.
+        Assert.Equal(2, result.Examined);
+        Assert.Equal(1, result.HeldForReview);
+        Assert.Equal(1, result.AutoKeptArchived);
+        Assert.Empty(result.Errors);
+        var review = Assert.Single((await store.LoadAsync()).ReviewQueue);
+        Assert.Equal(first, review.IncomingOriginalPath);
+        Assert.Equal(second, Assert.Single(recycleBin.RecycledPaths));
+        Assert.True(File.Exists(first));
+        Assert.False(File.Exists(second));
+    }
+
+    [Fact]
+    public async Task ACopyArrivingAfterTheReviewIsQueuedIsRecognisedToo()
+    {
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        using var archived = ImageFixtureFactory.CreatePattern(141);
+        using var incoming = ImageFixtureFactory.CreateNearDuplicate(archived);
+        await archived.SaveAsPngAsync(Path.Combine(archiveRoot, "existing.png"));
+        var first = Path.Combine(sourceRoot, "copy-a.png");
+        await incoming.SaveAsPngAsync(first);
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var decoder = new ImageDecoder();
+        var recycleBin = new FileRouterTests.FakeRecycleBinService();
+        var coordinator = new ScanCoordinator(
+            store,
+            new ArchiveIndexer(store, decoder),
+            decoder,
+            new FileRouter(store, decoder, recycleBin),
+            TimeSpan.Zero);
+        var held = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+        Assert.Equal(1, held.HeldForReview);
+
+        var second = Path.Combine(sourceRoot, "copy-b.png");
+        await incoming.SaveAsPngAsync(second);
+        var result = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+
+        // The queue survives between scans, so the copy that arrives later has to be measured
+        // against what is waiting in it, not only against the archive.
+        Assert.Equal(1, result.AutoKeptArchived);
+        Assert.Equal(0, result.HeldForReview);
+        Assert.Single((await store.LoadAsync()).ReviewQueue);
+        Assert.Equal(second, Assert.Single(recycleBin.RecycledPaths));
+    }
+
+    [Fact]
+    public async Task ASecondCopyGetsItsOwnReviewWhenTheRecycleBinIsUnavailable()
+    {
+        using var directory = new TestDirectory();
+        var sourceRoot = directory.GetPath("incoming");
+        var archiveRoot = directory.GetPath("archive", "Emoji");
+        Directory.CreateDirectory(sourceRoot);
+        Directory.CreateDirectory(archiveRoot);
+        using var archived = ImageFixtureFactory.CreatePattern(142);
+        using var incoming = ImageFixtureFactory.CreateNearDuplicate(archived);
+        await archived.SaveAsPngAsync(Path.Combine(archiveRoot, "existing.png"));
+        var first = Path.Combine(sourceRoot, "copy-a.png");
+        var second = Path.Combine(sourceRoot, "copy-b.png");
+        await incoming.SaveAsPngAsync(first);
+        await incoming.SaveAsPngAsync(second);
+        using var store = FileRouterTests.CreateStore(directory, sourceRoot, archiveRoot);
+        var decoder = new ImageDecoder();
+        var recycleBin = new FileRouterTests.FakeRecycleBinService(canRecycle: false);
+        var coordinator = new ScanCoordinator(
+            store,
+            new ArchiveIndexer(store, decoder),
+            decoder,
+            new FileRouter(store, decoder, recycleBin),
+            TimeSpan.Zero);
+
+        var result = await coordinator.ScanCategoryAsync(VrcImageCategory.Emoji);
+
+        // Tidying the queue is never worth losing a file: without a Recycle Bin both copies stay
+        // on disk and both get asked about.
+        Assert.Equal(0, result.AutoKeptArchived);
+        Assert.Equal(2, result.HeldForReview);
+        Assert.True(File.Exists(first));
+        Assert.True(File.Exists(second));
+        Assert.Equal(2, (await store.LoadAsync()).ReviewQueue.Count);
+    }
 }

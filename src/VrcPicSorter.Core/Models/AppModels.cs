@@ -94,6 +94,12 @@ public enum JournalOperationPurpose
     MoveDuplicateOverride,
     KeepExisting,
     AutoKeepArchived,
+
+    /// <summary>
+    /// Recycles a second copy of a picture that is already waiting in Review. The held copy keeps
+    /// the decision; this one was only ever the same picture saved under another name.
+    /// </summary>
+    AutoKeepHeld,
     DeleteArchiveCandidate,
     PreserveArchiveCandidate,
     RestoreReviewToSource,

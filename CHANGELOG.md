@@ -29,6 +29,11 @@ All notable changes to VRC Pic Sorter are recorded here. This project follows
   indexed, so all of this is recognised again on the next scan.
 - `tools/atlas-eval`, the harness used to decide whether a pixel-based frame detector was worth
   porting, together with what it recorded over 191 real emoji.
+- **Retained archives**, a section in Settings listing the folders that held the archive before the
+  output folder was changed, with the number of images and the size of each, and a button to move
+  them into the current archive. They stay indexed either way, so duplicates are still found across
+  them; this makes consolidating them a visible choice rather than one that only appears while the
+  output folder is being changed.
 
 ### Changed
 
@@ -61,6 +66,11 @@ All notable changes to VRC Pic Sorter are recorded here. This project follows
   where art really does sit past the last named frame.
 - Filing a reviewed image follows the output folder that is set now, rather than the one recorded
   when the review was queued.
+- Two copies of one picture each opened their own review card. An image waiting in Review is not in
+  the archive, so nothing compared a later file against it, and a folder holding `emoji.gif` and
+  `emoji (2).gif` asked the same question twice. A copy that decodes to exactly the same picture as
+  one already waiting now goes to the Recycle Bin instead, the way a copy of an archived image
+  already did. Without a Recycle Bin nothing is deleted and both copies still get asked about.
 
 ### Known limitations
 
